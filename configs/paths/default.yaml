@@ -1,0 +1,4 @@
+root_dir: ${hwavjepa_root:}
+data_dir: ${paths.root_dir}/data
+log_dir: ${paths.root_dir}/logs
+output_dir: ${hydra:runtime.output_dir}

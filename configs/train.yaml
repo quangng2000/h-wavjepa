@@ -1,0 +1,18 @@
+defaults:
+  - _self_
+  - data: synthetic
+  - model: hwavjepa
+  - callbacks: default
+  - logger: csv
+  - trainer: cpu
+  - paths: default
+  - hydra: default
+  - experiment: null
+  - optional local: default
+
+task_name: train
+seed: 42
+num_threads: 1
+tags: [scaffold]
+test: false
+ckpt_path: null

@@ -1,0 +1,18 @@
+_target_: src.models.hwavjepa_module.HWavJEPAModule
+encoder:
+  _target_: src.models.components.hierarchy.HierarchyEncoder
+  patch_size: 32
+  widths: [32, 48, 64]
+  pool_factors: [2, 2]
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 0.001
+  weight_decay: 0.01
+mask_ratio: 0.5
+# Keep this identical for flat and hierarchical comparisons.
+mask_group_size: 4
+ema_decay: 0.99
+prediction_weights: [1.0, 1.0, 1.0]
+protection_weight: 1.0
+protected_dim: 32

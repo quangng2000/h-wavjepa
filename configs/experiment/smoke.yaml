@@ -1,0 +1,12 @@
+# @package _global_
+tags: [smoke, not-a-benchmark]
+trainer:
+  max_epochs: 1
+  limit_train_batches: 2
+  limit_val_batches: 1
+  limit_test_batches: 1
+  enable_progress_bar: false
+data:
+  train_size: 8
+  val_size: 4
+  test_size: 4

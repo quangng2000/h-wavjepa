@@ -1,0 +1,6 @@
+defaults:
+  - train
+  - _self_
+
+task_name: eval
+ckpt_path: null

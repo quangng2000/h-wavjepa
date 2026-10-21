@@ -1,0 +1,8 @@
+# @package hydra
+run:
+  dir: ${paths.log_dir}/${task_name}/${now:%Y-%m-%d}/${now:%H-%M-%S-%f}
+sweep:
+  dir: ${paths.log_dir}/${task_name}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S-%f}
+  subdir: ${hydra.job.num}
+job:
+  chdir: false

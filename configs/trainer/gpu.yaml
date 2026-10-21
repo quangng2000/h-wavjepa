@@ -1,0 +1,5 @@
+defaults:
+  - cpu
+  - _self_
+accelerator: gpu
+precision: bf16-mixed

@@ -1,0 +1,9 @@
+_target_: src.data.synthetic_datamodule.SyntheticAudioDataModule
+sample_rate: 16000
+num_samples: 1024
+batch_size: 4
+num_workers: 0
+train_size: 32
+val_size: 16
+test_size: 16
+seed: ${seed}

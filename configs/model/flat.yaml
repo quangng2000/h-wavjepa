@@ -1,0 +1,9 @@
+defaults:
+  - hwavjepa
+  - _self_
+
+encoder:
+  widths: [32]
+  pool_factors: []
+prediction_weights: [1.0]
+protection_weight: 0.0

@@ -1,0 +1,4 @@
+defaults:
+  - cpu
+  - _self_
+accelerator: mps
