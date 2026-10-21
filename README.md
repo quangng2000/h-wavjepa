@@ -4,7 +4,7 @@ A Lightning + Hydra research scaffold for **low / medium / high temporal audio r
 
 **Status:** runnable small prototype, not a reproduction of released WavJEPA, not a trained foundation model, and not a Lean-verified neural implementation. Synthetic smoke checks validate software plumbing—not research hypotheses or superiority.
 
-The organization follows [ashleve/lightning-hydra-template](https://github.com/ashleve/lightning-hydra-template), with independent project-specific code and configuration. See [template provenance](docs/TEMPLATE.md). Formal results live separately in [hjepa-lean](https://github.com/quangng2000/hjepa-lean).
+Built on the **actual [ashleve/lightning-hydra-template](https://github.com/ashleve/lightning-hydra-template)**, imported at commit `bddbc24b82ab6ccfa6243e815a49dc5bfe8d4144`. Its train/eval pipeline, task wrapper, utilities, configuration groups, and root discovery are retained, with MNIST replaced by our H-WavJEPA components. See the [import and customization ledger](docs/TEMPLATE.md). Formal results live separately in [hjepa-lean](https://github.com/quangng2000/hjepa-lean).
 
 ## Quick start
 
@@ -13,18 +13,21 @@ From this project directory, using [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync --frozen
 uv run pytest
-uv run python -m src.train experiment=smoke
+uv run python src/train.py experiment=smoke
 ```
 
 The smoke preset runs two CPU training batches and one validation batch on generated audio. It needs no dataset, account, pretrained checkpoint, or external logging service. It does **not** run a benchmark. Test-set evaluation is opt-in with `test=true`.
 
-Runs are written to `logs/train/<date>/<time>/`:
+The template's direct-script entry points and `python -m src.train` / `src.eval` both work. `rootutils` discovers `.project-root`, sets `PROJECT_ROOT`, and loads an optional ignored `.env` file.
+
+Runs are written to `logs/train/runs/<date>_<time>/`:
 
 - `config.yaml`: resolved experiment configuration.
 - `provenance.json`: package versions, seed, Git revision/dirty status, parameter counts.
-- `metrics/version_0/metrics.csv`: training/validation losses and diagnostics.
+- `csv/version_0/metrics.csv`: training/validation losses and diagnostics.
 - `checkpoints/`: best validation-loss checkpoint and `last.ckpt`.
 - `.hydra/`: Hydra configuration and override history.
+- `config_tree.log` / `tags.log`: the upstream Rich configuration and tag helpers.
 
 ## Structure
 
@@ -34,8 +37,11 @@ configs/
   model/         Architecture, protection, optimizer, teacher and masking
   experiment/    Flat, two-level, three-level and protection ablations
   trainer/       CPU, Apple MPS and CUDA presets
-  callbacks/     Checkpoints and learning-rate logging
-  logger/        Local CSV logging
+  callbacks/     Checkpoints, early stopping and Rich progress/summary
+  logger/        CSV plus upstream optional logger presets
+  debug/         Fast-dev, limited-batch, overfit and profiler presets
+  extras/        Rich config printing and tag handling
+  hparams_search/ Optuna search configuration
   paths/         Data and output locations
   hydra/         Single-run and sweep directories
   local/         Ignored machine-specific overrides
@@ -43,11 +49,12 @@ src/
   data/          Datasets and LightningDataModules
   models/        Lightning orchestration and independent model components
   objectives/    Loss functions
-  utils/         Object construction and run provenance
+  utils/         Upstream instantiation, logging, Rich output and task wrapper
   train.py       Training / checkpoint resume entry point
   eval.py        Explicit checkpoint evaluation entry point
 tests/           Data, masking, EMA, configuration and checkpoint tests
 docs/            Design decisions and theory boundaries
+notebooks/       Upstream notebook workspace
 ```
 
 ## What the model does
@@ -73,7 +80,15 @@ uv run python -m src.train experiment=flat_protected
 uv run python -m src.train experiment=two_level
 
 # Hydra sweep: separate directories for every run
-uv run python -m src.train --multirun experiment=smoke seed=1,2,3
+uv run python src/train.py --multirun experiment=smoke seed=1,2,3
+
+# Upstream debug and Optuna integration (pipeline checks, not research evidence)
+uv run python src/train.py experiment=smoke debug=fdr
+uv run python src/train.py -m experiment=smoke debug=fdr \
+  hparams_search=hwavjepa_optuna hydra.sweeper.n_trials=2
+
+# Disable loggers / explicitly configured callbacks
+uv run python src/train.py experiment=smoke 'logger=[]' callbacks=none
 
 # Hardware choice: only CPU is part of the automated smoke check
 uv run python -m src.train experiment=smoke trainer=mps
@@ -81,6 +96,8 @@ uv run python -m src.train experiment=smoke trainer=gpu
 ```
 
 These presets share the fixture/context and raw masking group, but are **not parameter- or compute-matched**. Parameter counts are recorded; a matched-budget study and shared-space multiscale baseline remain to implement. MPS/CUDA configs are provided, not claims of hardware validation. No TPU or distributed validation is claimed.
+
+Optuna minimizes validation objective only; it is not a downstream-performance comparison. The regular HPO preset allows 20 trials: set an explicit budget before using it beyond smoke checks. Upstream W&B, TensorBoard, MLflow, Comet, Neptune, and Aim configuration files are included but their optional SDKs are not installed or activated by default. Install/configure only the integration you choose. Those external services and the inherited DDP presets are unvalidated here.
 
 ## Your own WAV files
 
@@ -114,6 +131,8 @@ uv run python -m src.eval experiment=smoke \
 
 Use the **same architecture, data and objective overrides** recorded in the checkpoint run's `config.yaml`. A checkpoint does not automatically select a Hydra experiment. Lightning checkpoints include model/EMA weights, optimizer state, and training progress. Exact bitwise continuation of random sampling is not guaranteed here. Load only checkpoints you trust.
 
+The upstream Python API returns `(metric_dict, object_dict)` from both `train(cfg)` and `evaluate(cfg)`; retrieve the model/trainer as `object_dict["model"]` / `object_dict["trainer"]`. `train=false test=true` requires an explicit checkpoint so an evaluation cannot silently use newly initialized weights.
+
 `src.eval` currently measures held-out objective terms. It is **not** HEAR evaluation, a trained downstream probe, or a generalization certificate. Synthetic order/detail labels are fixture metadata and are not used by the self-supervised objective.
 
 ## Theory boundary and next milestones
@@ -133,6 +152,9 @@ Next research work:
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
+uv run pre-commit run --all-files
 ```
 
-No remote repository or training service is required. Data, checkpoints and run outputs are ignored by Git. `uv.lock` pins the environment; CI runs the same CPU checks.
+No remote training service is required. Data, checkpoints and run outputs are ignored by Git. `uv.lock` pins the environment; CI runs the CPU checks. `requirements.txt` also exposes the runtime dependencies for pip users, while `uv` remains the reproducible installation path. Pre-commit hooks are available but are not automatically installed into your Git hooks.
+
+Upstream template attribution and its MIT notice are preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

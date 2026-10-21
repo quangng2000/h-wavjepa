@@ -1,4 +1,5 @@
 defaults:
-  - cpu
-  - _self_
+  - default
+
 accelerator: mps
+devices: 1

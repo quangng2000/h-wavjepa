@@ -6,6 +6,10 @@ trainer:
   limit_val_batches: 1
   limit_test_batches: 1
   enable_progress_bar: false
+# An explicit progress-bar callback conflicts with enable_progress_bar: false.
+callbacks:
+  rich_progress_bar: null
+  model_summary: null
 data:
   train_size: 8
   val_size: 4

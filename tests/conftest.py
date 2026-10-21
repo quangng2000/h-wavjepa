@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import pytest
+import rootutils
 import torch
 from hydra import compose, initialize_config_dir
 
@@ -15,7 +14,7 @@ def cpu_thread_limit():
 
 @pytest.fixture
 def make_config(tmp_path):
-    root = Path(__file__).resolve().parents[1]
+    root = rootutils.find_root(search_from=__file__, indicator=".project-root")
 
     def factory(overrides=(), name="train"):
         with initialize_config_dir(version_base="1.3", config_dir=str(root / "configs")):
@@ -25,6 +24,8 @@ def make_config(tmp_path):
                     "experiment=smoke",
                     f"paths.root_dir={root}",
                     f"paths.output_dir={tmp_path / 'run'}",
+                    f"paths.log_dir={tmp_path / 'logs'}",
+                    f"paths.work_dir={root}",
                     "trainer.enable_model_summary=false",
                     *overrides,
                 ],

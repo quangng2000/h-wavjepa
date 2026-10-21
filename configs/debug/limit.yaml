@@ -1,0 +1,13 @@
+# @package _global_
+
+# Bound the small audio fixtures to a few batches per epoch.
+# Fractional upstream limits can round down to zero for these tiny datasets.
+
+defaults:
+  - default
+
+trainer:
+  max_epochs: 3
+  limit_train_batches: 2
+  limit_val_batches: 1
+  limit_test_batches: 1

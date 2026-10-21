@@ -1,6 +1,24 @@
-defaults:
-  - train
-  - _self_
+# @package _global_
 
-task_name: eval
+defaults:
+  - _self_
+  - data: synthetic # choose datamodule with `test_dataloader()` for evaluation
+  - model: hwavjepa
+  - logger: csv
+  - trainer: cpu
+  - paths: default
+  - extras: default
+  - hydra: default
+  - experiment: null
+  - optional local: default
+  - debug: null
+
+task_name: "eval"
+
+tags: ["hwavjepa"]
+
+# passing checkpoint path is necessary for evaluation
 ckpt_path: null
+
+seed: 42
+num_threads: 1

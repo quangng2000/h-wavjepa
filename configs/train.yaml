@@ -1,18 +1,55 @@
+# @package _global_
+
+# specify here default configuration
+# order of defaults determines the order in which configs override each other
 defaults:
   - _self_
   - data: synthetic
   - model: hwavjepa
   - callbacks: default
-  - logger: csv
+  - logger: csv # optional integrations require their SDKs; see docs/TEMPLATE.md
   - trainer: cpu
   - paths: default
+  - extras: default
   - hydra: default
+
+  # experiment configs allow for version control of specific hyperparameters
+  # e.g. best hyperparameters for given model and datamodule
   - experiment: null
+
+  # config for hyperparameter optimization
+  - hparams_search: null
+
+  # optional local config for machine/user specific settings
+  # it's optional since it doesn't need to exist and is excluded from version control
   - optional local: default
 
-task_name: train
-seed: 42
-num_threads: 1
-tags: [scaffold]
-test: false
+  # debugging config (enable through command line, e.g. `python train.py debug=default)
+  - debug: null
+
+# task name, determines output directory path
+task_name: "train"
+
+# tags to help you identify your experiments
+# you can overwrite this in experiment configs
+# overwrite from command line with `python train.py tags="[first_tag, second_tag]"`
+tags: ["hwavjepa"]
+
+# set False to skip model training
+train: True
+
+# evaluate on test set, using best model weights achieved during training
+# lightning chooses best weights based on the metric specified in checkpoint callback
+test: False
+
+# simply provide checkpoint path to resume training
 ckpt_path: null
+
+# seed for random number generators in pytorch, numpy and python.random
+seed: 42
+
+# Small fixtures run efficiently with one CPU thread; override for real workloads.
+num_threads: 1
+
+# Set by a hyperparameter-search configuration when optimizing a metric.
+optimized_metric: null
