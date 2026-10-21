@@ -6,3 +6,7 @@ sample_rate: 16000
 num_samples: 1024
 batch_size: 4
 num_workers: 0
+pin_memory: false
+persistent_workers: false
+# Set a positive value only with num_workers > 0; null uses PyTorch's default.
+prefetch_factor: null

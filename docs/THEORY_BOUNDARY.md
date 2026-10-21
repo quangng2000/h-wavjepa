@@ -18,7 +18,7 @@ The authoritative theorem ledger is [hjepa-lean](https://github.com/quangng2000/
 4. The unmasked protection branch has separate parameters and no connection into masked predictors. Its loss shares the optimizer, not its inputs or activations.
 5. Perturbing hidden samples must leave student predictions unchanged for a fixed mask and weights. Tests check this at all three levels.
 
-This prototype uses one aligned block mask across scales. It does not reproduce WavJEPA's released architecture, target normalization or masking recipe; it does not implement causal forecasting, H-JEPA planning, or SIGReg. A future global frontend, overlapping convolution, skip connection, normalization change, or pretrained integration requires a fresh support/leakage audit.
+This implementation uses one aligned block mask across scales. It does not reproduce WavJEPA's released architecture, target normalization or masking recipe; it does not implement causal forecasting, H-JEPA planning, or SIGReg. A future global frontend, overlapping convolution, skip connection, normalization change, or pretrained integration requires a fresh support/leakage audit.
 
 ## Evidence we do not yet have
 

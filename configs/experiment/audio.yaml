@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /data: wav
+  - override /model: hwavjepa
+
+tags: [audio, three-level, protected]
+num_threads: 4
+data:
+  # Eight seconds at 16 kHz. Supply all three explicitly split manifests.
+  num_samples: 128000
+  batch_size: 8
+  num_workers: 4
+  persistent_workers: true
+  prefetch_factor: 2
+model:
+  encoder:
+    patch_size: 320
+    widths: [128, 192, 256]
+    pool_factors: [4, 4]
+  mask_group_size: 16
+  protected_dim: 128
+  optimizer:
+    lr: 0.0003
+trainer:
+  max_epochs: 100
+  log_every_n_steps: 10

@@ -1,4 +1,4 @@
 # @package _global_
 defaults:
   - override /model: flat
-tags: [flat, unprotected, scaffold]
+tags: [flat, unprotected, research]

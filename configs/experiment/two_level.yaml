@@ -1,5 +1,5 @@
 # @package _global_
-tags: [two-level, protected, scaffold]
+tags: [two-level, protected, research]
 model:
   encoder:
     widths: [32, 48]

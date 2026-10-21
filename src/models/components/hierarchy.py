@@ -2,23 +2,33 @@
 
 from collections.abc import Sequence
 from math import prod
+from numbers import Integral
 
 import torch
 from torch import Tensor, nn
 
 
+def _positive_integer(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
 def patchify(waveform: Tensor, patch_size: int) -> Tensor:
     """Return [batch, patches, samples] without padding or temporal mixing."""
+    patch_size = _positive_integer(patch_size, "patch_size")
     if waveform.ndim == 3 and waveform.shape[1] == 1:
         waveform = waveform.squeeze(1)
     if waveform.ndim != 2:
         raise ValueError("waveform must have shape [B,T] or [B,1,T]")
     if not waveform.is_floating_point():
         raise ValueError("waveform must be floating point")
-    if patch_size <= 0 or waveform.shape[1] == 0 or waveform.shape[1] % patch_size:
+    if waveform.shape[1] == 0 or waveform.shape[1] % patch_size:
         raise ValueError("nonempty waveform length must be divisible by patch_size")
     if waveform.shape[0] == 0:
         raise ValueError("waveform batch must be nonempty")
+    if not torch.isfinite(waveform).all():
+        raise ValueError("waveform samples must be finite (no NaN or infinity)")
     return waveform.reshape(waveform.shape[0], -1, patch_size)
 
 
@@ -36,15 +46,15 @@ class HierarchyEncoder(nn.Module):
         pool_factors: Sequence[int] = (2, 2),
     ) -> None:
         super().__init__()
-        self.patch_size = int(patch_size)
-        self.widths = tuple(int(width) for width in widths)
-        self.pool_factors = tuple(int(factor) for factor in pool_factors)
-        if self.patch_size <= 0 or not self.widths or any(d <= 0 for d in self.widths):
-            raise ValueError("patch_size and all widths must be positive")
+        self.patch_size = _positive_integer(patch_size, "patch_size")
+        self.widths = tuple(_positive_integer(width, "widths") for width in widths)
+        self.pool_factors = tuple(
+            _positive_integer(factor, "pool_factors") for factor in pool_factors
+        )
+        if not self.widths:
+            raise ValueError("widths must contain at least one level")
         if len(self.pool_factors) != len(self.widths) - 1:
             raise ValueError("provide one pool factor for each upper level")
-        if any(factor < 1 for factor in self.pool_factors):
-            raise ValueError("pool factors must be positive")
         self.patch_encoder = nn.Sequential(
             nn.Linear(self.patch_size, self.widths[0]),
             nn.GELU(),
@@ -59,9 +69,21 @@ class HierarchyEncoder(nn.Module):
     def total_pool_factor(self) -> int:
         return prod(self.pool_factors)
 
+    def construction_config(self) -> dict[str, int | list[int]]:
+        """Plain checkpoint metadata, including pooling semantics absent from weights."""
+        return {
+            "patch_size": self.patch_size,
+            "widths": list(self.widths),
+            "pool_factors": list(self.pool_factors),
+        }
+
     def forward_patches(self, patches: Tensor) -> list[Tensor]:
         if patches.ndim != 3 or patches.shape[-1] != self.patch_size:
             raise ValueError("patches must have shape [B,N,patch_size]")
+        if patches.shape[0] == 0 or not patches.is_floating_point():
+            raise ValueError("patches must be a nonempty floating point batch")
+        if not torch.isfinite(patches).all():
+            raise ValueError("patch samples must be finite (no NaN or infinity)")
         if patches.shape[1] == 0 or patches.shape[1] % self.total_pool_factor:
             raise ValueError("patch count must be divisible by the total pool factor")
         values = self.patch_encoder(patches)

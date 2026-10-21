@@ -1,6 +1,5 @@
 """H-WavJEPA extension: local, non-networked run provenance."""
 
-import json
 import platform
 import subprocess
 from pathlib import Path
@@ -9,6 +8,8 @@ import hydra
 import lightning
 import torch
 from omegaconf import DictConfig, OmegaConf
+
+from src.utils.runtime import atomic_json, file_sha256
 
 
 def write_provenance(cfg: DictConfig, model: lightning.LightningModule) -> None:
@@ -43,6 +44,15 @@ def write_provenance(cfg: DictConfig, model: lightning.LightningModule) -> None:
         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
         "total_parameters_including_teacher": sum(p.numel() for p in model.parameters()),
         "seed": cfg.seed,
-        "status": "research scaffold; metrics are not evidence of superiority",
+        "purpose": "audio representation research; objective metrics are not downstream performance",
+        "input_checkpoint_sha256": file_sha256(cfg.ckpt_path) if cfg.get("ckpt_path") else None,
+        "manifests": {
+            key: {
+                "path": str(Path(value).expanduser().resolve()),
+                "sha256": file_sha256(Path(value).expanduser()),
+            }
+            for key, value in cfg.data.items()
+            if key.endswith("_manifest") and value
+        },
     }
-    (output_dir / "provenance.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    atomic_json(output_dir / "provenance.json", metadata)

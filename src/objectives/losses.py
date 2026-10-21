@@ -21,7 +21,10 @@ def masked_prediction_loss(
             raise ValueError("prediction, target, and mask shapes must agree")
         if mask.dtype != torch.bool or not mask.any():
             raise ValueError("each prediction level needs a nonempty boolean target mask")
-        terms.append((prediction - target.detach()).square().mean(dim=-1)[mask].mean())
+        error = (prediction - target.detach()).square().mean(dim=-1)
+        # Boolean indexing needs scatter-add in backward, unsupported by strict
+        # deterministic MPS. This identical masked mean uses only dense reduction.
+        terms.append(error.masked_fill(~mask, 0).sum() / mask.sum())
     return sum(weight * term for weight, term in zip(weights, terms, strict=True)), terms
 
 

@@ -37,11 +37,13 @@ from src.utils import (  # noqa: E402 -- rootutils must establish the project im
     task_wrapper,
     write_provenance,
 )
+from src.utils.runtime import record_run, validate_config
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
 @task_wrapper
+@record_run
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
     training.
@@ -52,6 +54,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     :param cfg: A DictConfig configuration composed by Hydra.
     :return: A tuple with metrics and dict with all instantiated objects.
     """
+    validate_config(cfg)
+    extras(cfg)
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed") is not None:
         L.seed_everything(cfg.seed, workers=True)
@@ -70,7 +74,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
     log.info(f"Instantiating model <{cfg.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
+    model_kwargs = (
+        {"input_sample_rate": cfg.data.sample_rate}
+        if cfg.model._target_ == "src.models.hwavjepa_module.HWavJEPAModule"
+        else {}
+    )
+    model: LightningModule = hydra.utils.instantiate(cfg.model, **model_kwargs)
 
     log.info("Instantiating callbacks...")
     callbacks: List[Callback] = instantiate_callbacks(cfg.get("callbacks"))
@@ -103,7 +112,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if cfg.get("train"):
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        trainer.fit(
+            model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"), weights_only=True
+        )
 
     train_metrics = dict(trainer.callback_metrics)
 
@@ -122,7 +133,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             ckpt_path = checkpoint
         elif ckpt_path is None:
             log.warning("Best ckpt not found! Using current weights for testing...")
-        trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
+        trainer.test(model=model, datamodule=datamodule, ckpt_path=ckpt_path, weights_only=True)
         log.info(f"Best ckpt path: {ckpt_path}")
 
     test_metrics = dict(trainer.callback_metrics)
@@ -140,12 +151,6 @@ def main(cfg: DictConfig) -> Optional[float]:
     :param cfg: DictConfig configuration composed by Hydra.
     :return: Optional[float] with optimized metric value.
     """
-    # apply extra utilities
-    # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
-    # The user may override paths.output_dir independently of Hydra's run directory.
-    Path(cfg.paths.output_dir).mkdir(parents=True, exist_ok=True)
-    extras(cfg)
-
     # train the model
     metric_dict, _ = train(cfg)
 

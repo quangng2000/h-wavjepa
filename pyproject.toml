@@ -1,11 +1,11 @@
 [project]
 name = "h-wavjepa"
 version = "0.1.0"
-description = "Three-level waveform JEPA research scaffold with protected representations"
+description = "Three-level waveform JEPA training and representation extraction"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "torch>=2.6,<3",
-  "lightning>=2.5,<3",
+  "lightning>=2.6.6,<3",
   "hydra-core==1.3.2",
   "hydra-colorlog==1.2.0",
   "hydra-optuna-sweeper==1.2.0",

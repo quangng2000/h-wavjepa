@@ -35,11 +35,13 @@ from src.utils import (  # noqa: E402 -- rootutils must establish the project im
     task_wrapper,
     write_provenance,
 )
+from src.utils.runtime import record_run, validate_config
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
 @task_wrapper
+@record_run
 def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Evaluates given checkpoint on a datamodule testset.
 
@@ -49,6 +51,8 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     :param cfg: DictConfig configuration composed by Hydra.
     :return: Tuple[dict, dict] with metrics and dict with all instantiated objects.
     """
+    validate_config(cfg)
+    extras(cfg)
     if not cfg.get("ckpt_path") or not Path(cfg.ckpt_path).is_file():
         raise ValueError("Evaluation requires ckpt_path=/absolute/path/to/trusted.ckpt")
     # Keep Lightning/PyTorch safe-loading defaults for the trusted local checkpoint.
@@ -61,7 +65,12 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
     log.info(f"Instantiating model <{cfg.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
+    model_kwargs = (
+        {"input_sample_rate": cfg.data.sample_rate}
+        if cfg.model._target_ == "src.models.hwavjepa_module.HWavJEPAModule"
+        else {}
+    )
+    model: LightningModule = hydra.utils.instantiate(cfg.model, **model_kwargs)
 
     log.info("Instantiating loggers...")
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
@@ -86,7 +95,7 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log_hyperparameters(object_dict)
 
     log.info("Starting testing!")
-    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path, weights_only=True)
 
     # for predictions use trainer.predict(...)
     # predictions = trainer.predict(model=model, dataloaders=dataloaders, ckpt_path=cfg.ckpt_path)
@@ -102,12 +111,6 @@ def main(cfg: DictConfig) -> None:
 
     :param cfg: DictConfig configuration composed by Hydra.
     """
-    # apply extra utilities
-    # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
-    # The user may override paths.output_dir independently of Hydra's run directory.
-    Path(cfg.paths.output_dir).mkdir(parents=True, exist_ok=True)
-    extras(cfg)
-
     evaluate(cfg)
 
 

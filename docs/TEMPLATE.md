@@ -29,12 +29,13 @@ The migration does not change `src/models/`, `src/data/`, or `src/objectives/`: 
 - Preserve `uv.lock` and Python 3.12 rather than adopting the template's old Conda/Python-version matrix. No unnecessary torchvision or MNIST downloads.
 - Keep CSV logging and `test=false` by default; do not activate remote services. Logger presets need their separate SDKs/accounts before use. Use `logger=[]` to disable loggers.
 - Correct seed-zero handling; preserve a configurable CPU thread count for small fixtures.
-- Retain `config.yaml` / `provenance.json` via `src/utils/provenance.py`. Remove the earlier competing `runtime.py` orchestration and custom root resolver.
+- Retain `config.yaml` / `provenance.json` via `src/utils/provenance.py`. The earlier competing orchestration and custom root resolver were removed. The new `src/utils/runtime.py` only adds preflight and local artifact safety; Lightning still owns the loop.
 - Support both direct-script and module entry points through upstream `rootutils` and `.project-root`.
 - Validate local checkpoint paths, retain safe loading, support callback/logger-free training, and require a checkpoint for test-only execution.
 - Use `val/loss` for checkpointing, early stopping, and Optuna; none of these is a cross-model downstream research score.
 - Adapt debug batch limits to tiny audio fixtures and remove MNIST-only datamodule fields. Keep microsecond run-directory timestamps to reduce collisions.
 - Use the upstream pre-commit hygiene checks with locked Ruff rather than conflicting old formatter stacks. Keep the project's lightweight CPU GitHub workflow; do not activate upstream release-drafting or Codecov publishing integrations.
+- Add versioned model checkpoints, finite-value guards, stable evaluation masks, WAV validation and checkpoint-based extraction. See [operations](OPERATIONS.md) for the tested boundary.
 
 ## Not included or not claimed
 

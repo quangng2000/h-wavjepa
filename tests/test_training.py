@@ -125,12 +125,14 @@ def test_upstream_fast_dev_run(make_config):
     assert torch.isfinite(metrics["test/loss"])
 
 
-def test_zero_seed_reproducibly_initializes_model_without_fit(make_config):
+def test_zero_seed_reproducibly_initializes_model_without_fit(make_config, tmp_path):
     overrides = ["seed=0", "train=false", "test=false", "callbacks=none", "logger=[]"]
     torch.manual_seed(123)
     first_metrics, first = train(make_config(overrides))
     torch.manual_seed(456)
-    second_metrics, second = train(make_config(overrides))
+    second_metrics, second = train(
+        make_config([*overrides, f"paths.output_dir={tmp_path / 'second'}"])
+    )
     assert first_metrics == second_metrics == {}
     assert first["trainer"].global_step == second["trainer"].global_step == 0
     for key, value in first["model"].state_dict().items():
