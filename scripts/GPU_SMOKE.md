@@ -49,6 +49,11 @@ git archive --format=tar HEAD .project-root pyproject.toml uv.lock requirements.
 The Dockerfile lives at the context root because this platform resolves build
 inputs relative to its directory. It pins the official runtime image digest and derives Python
 constraints from `uv.lock`, retaining the image's matched CUDA/Torch stack.
+The generated constraints exclude `cuda-*`, `nvidia-*`, Torch companion packages,
+and Triton, then explicitly pin `torch==2.13.0+cu126`. This prevents the lockfile's
+CUDA 13 dependencies from forcing a replacement of the image's CUDA 12.6 build.
+The Docker build checks Torch/CUDA versions before and after installation and
+imports Lightning and Hydra before any GPU time can be charged.
 
 On 2026-10-22, `validate_job` quotes **$1.26 maximum GPU runtime** for two H100s
 over ten minutes. The published build rate is $0.01/minute, so its separate
