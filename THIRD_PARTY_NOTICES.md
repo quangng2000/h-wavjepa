@@ -1,5 +1,39 @@
 # Third-party notices
 
+## WavJEPA
+
+The actual core from [labhamlet/wavjepa](https://github.com/labhamlet/wavjepa),
+commit `6f4e1b1f18316c50768c8523f325ccffeaa6985b`, is retained in
+`src/vendor/wavjepa`. See its [source/diff record](src/vendor/wavjepa/UPSTREAM.json),
+[notices](src/vendor/wavjepa/NOTICE.md), [BSD license](src/vendor/wavjepa/LICENSE),
+and [inherited AudioMAE license](src/vendor/wavjepa/LICENSE-AudioMAE).
+The positional utilities carry Meta copyright and AudioMAE attribution;
+AudioMAE's license is CC-BY-NC-4.0. Commercial clearance is not claimed.
+Unrelated upstream denoising, data-loading and evaluation vendor packages are
+not imported. Source reuse does not imply upstream endorsement or reproduced results.
+
+## H-JEPA SIGReg
+
+`src/objectives/sigreg.py` adapts SIGReg from `h_jepa/loss.py` in
+[kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA), commit
+`97054ecaff83e13839195ec4b92d74c08a0127c5`. The single-device formula is retained;
+validation is added and the unvalidated distributed reduction is excluded.
+The [MIT license and author notice](third_party/licenses/H-JEPA.txt) are retained.
+Default projection count is configurable and differs from the paper's recipe.
+The unmodified `tests/fixtures/h_jepa/loss.py` at the same revision is retained
+solely for independent numerical and gradient comparisons; its SHA-256 is recorded
+alongside it. The same MIT notice applies to that fixture.
+
+## HEAR evaluation kit
+
+The optional isolated evaluator installs [hearbenchmark/hear-eval-kit](https://github.com/hearbenchmark/hear-eval-kit)
+at commit `855964977238e89dfc76394aa11c37010edb6f20` under its Apache-2.0 license.
+Its code is installed as a separate dependency, not bundled in this repository.
+The SHA-256 guarded compatibility patches make TensorFlow optional and adapt the
+chosen-epoch lookup for Lightning 1.9 event postprocessing. They preserve upstream
+probe models, label alignment, metrics and validation selection. See
+[evaluation setup and patch details](docs/HEAR.md).
+
 ## Lightning-Hydra-Template
 
 This project imports and adapts code, configurations, and development workflow files from [ashleve/lightning-hydra-template](https://github.com/ashleve/lightning-hydra-template), revision `bddbc24b82ab6ccfa6243e815a49dc5bfe8d4144`. See [the integration record](docs/TEMPLATE.md) for the imported file scope and project-specific changes.

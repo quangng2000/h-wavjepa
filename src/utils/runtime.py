@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 from lightning_utilities.core.rank_zero import rank_zero_only
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -34,6 +34,22 @@ def atomic_json(path: Path, value: dict) -> None:
 def file_sha256(path: str | Path) -> str:
     with Path(path).expanduser().open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def model_config_for_checkpoint(cfg: DictConfig) -> DictConfig:
+    """A complete Lightning checkpoint owns all weights on resume/evaluation.
+
+    Avoid downloading or requiring an initialization file that will immediately
+    be replaced. Do not mutate the user's requested config or checkpoint schema.
+    """
+    if cfg.get("ckpt_path") and cfg.model.get("_target_") == (
+        "src.models.hierarchical_wavjepa_module.HierarchicalWavJEPAModule"
+    ):
+        return OmegaConf.merge(
+            cfg.model,
+            {"backbone": {"checkpoint_path": None, "pretrained": False, "pretrained_path": None}},
+        )
+    return cfg.model
 
 
 def validate_config(cfg: DictConfig) -> None:
@@ -62,6 +78,12 @@ def validate_config(cfg: DictConfig) -> None:
             "the parent Trainer can retain stale progress and checkpoint paths. "
             "Use single-device training or externally launched DDP with appropriate validation."
         )
+    if (
+        cfg.model.get("_target_")
+        == "src.models.hierarchical_wavjepa_module.HierarchicalWavJEPAModule"
+    ):
+        _validate_upstream_forecasting(cfg)
+        return
     # This is a H-WavJEPA input contract, not a restriction on arbitrary Hydra models.
     if cfg.model.get("_target_") != "src.models.hwavjepa_module.HWavJEPAModule":
         return
@@ -86,6 +108,71 @@ def validate_config(cfg: DictConfig) -> None:
         raise ValueError("data.num_samples must be divisible by patch_size * mask_group_size")
     if samples // (patch * group) < 2:
         raise ValueError("data.num_samples must provide at least two mask groups")
+
+
+def _validate_upstream_forecasting(cfg: DictConfig) -> None:
+    """Bound the initial upstream-backed route to audited input/runtime modes."""
+    backbone = cfg.model.backbone.config
+    values = {
+        "data.num_samples": cfg.data.num_samples,
+        "data.sample_rate": cfg.data.sample_rate,
+        "backbone.window_samples": backbone.window_samples,
+        "backbone.sample_rate": backbone.sample_rate,
+        "context_windows": cfg.model.context_windows,
+    }
+    for name, value in values.items():
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    horizons, strides = cfg.model.horizons, cfg.model.state_strides
+    if len(horizons) != 3 or len(strides) != 3:
+        raise ValueError("upstream forecasting requires three horizons and state_strides")
+    for name, sequence in (("horizons", horizons), ("state_strides", strides)):
+        if any(type(value) is not int or value < 1 for value in sequence):
+            raise ValueError(f"{name} must contain positive integers")
+    if list(horizons) != sorted(set(horizons)):
+        raise ValueError("horizons must be strictly increasing")
+    if strides[0] != 1 or list(strides) != sorted(strides):
+        raise ValueError("state_strides must start at 1 and be nondecreasing")
+    if any((cfg.model.context_windows - 1) % stride for stride in strides):
+        raise ValueError("context_windows - 1 must be divisible by every state_stride")
+    if cfg.data.sample_rate != backbone.sample_rate:
+        raise ValueError("data.sample_rate must match backbone.sample_rate")
+    expected = backbone.window_samples * (cfg.model.context_windows + max(horizons))
+    if cfg.data.num_samples != expected:
+        raise ValueError(
+            "data.num_samples must equal backbone.window_samples * "
+            f"(context_windows + max(horizons)) = {expected}"
+        )
+    if (
+        cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
+        and cfg.data.get("require_full_length") is not True
+    ):
+        raise ValueError("upstream forecasting requires data.require_full_length=true")
+    if cfg.model.regularization_weight > 0:
+        if cfg.data.batch_size < 2:
+            raise ValueError("SIGReg requires data.batch_size >= 2")
+        if (
+            cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
+            and cfg.data.get("minimum_batch_size", 1) < 2
+        ):
+            raise ValueError("SIGReg requires data.minimum_batch_size >= 2 for WAV datasets")
+    if cfg.trainer.get("accelerator", "cpu") not in ("cpu", "cuda", "gpu"):
+        raise ValueError(
+            "upstream forecasting supports explicit cpu/cuda/gpu accelerators only; "
+            "MPS seeded RNG isolation is not yet validated"
+        )
+    if cfg.trainer.get("precision", "32-true") not in (32, "32", "32-true"):
+        raise ValueError("upstream forecasting currently supports only full FP32 precision")
+    devices = cfg.trainer.get("devices", 1)
+    single_device = type(devices) is int and devices == 1
+    if isinstance(devices, (list, tuple)) or OmegaConf.is_list(devices):
+        single_device = len(devices) == 1
+    if (
+        not single_device
+        or cfg.trainer.get("num_nodes", 1) != 1
+        or cfg.trainer.get("strategy", "auto") != "auto"
+    ):
+        raise ValueError("upstream forecasting currently supports one device with strategy=auto")
 
 
 def _now() -> str:

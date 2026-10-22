@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - upstream_hierarchical
+  - _self_
+
+tags: [upstream-wavjepa, pretrained, hierarchical, future-dynamics, research]
+model:
+  backbone:
+    # Download the pinned official base release into the Hugging Face cache.
+    # Only the backbone is pretrained; the new abstractions/predictors start fresh.
+    pretrained: true

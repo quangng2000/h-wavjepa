@@ -1,5 +1,8 @@
 # Usage
 
+This page covers the earlier independent prototype. For the new official-WavJEPA
+training extension, use [Upstream dynamics](UPSTREAM_DYNAMICS.md).
+
 Run commands from the repository after `uv sync --frozen`. Direct-script train/eval entry points also discover the checkout from another directory. Hydra configs execute Python construction instructions; use trusted configurations only.
 
 ## Real audio

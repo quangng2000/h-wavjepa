@@ -1,0 +1,50 @@
+# @package _global_
+defaults:
+  - override /data: synthetic
+  - override /model: upstream_hierarchical
+
+tags: [upstream-wavjepa, smoke, not-a-benchmark]
+num_threads: 1
+data:
+  num_samples: 4608
+  batch_size: 2
+  train_size: 8
+  val_size: 4
+  test_size: 4
+  num_workers: 0
+model:
+  backbone:
+    config:
+      window_samples: 512
+      conv_layers: [[8, 4, 2], [8, 3, 2]]
+      encoder_dim: 16
+      encoder_heads: 2
+      encoder_layers: 1
+      decoder_dim: 8
+      decoder_heads: 2
+      decoder_layers: 1
+      average_top_k_layers: 1
+      masker:
+        target_masks_per_context: 1
+        context_mask_prob: 0.25
+        context_mask_length: 2
+        target_prob: 0.25
+        target_length: 2
+  hidden_dim: 16
+  predictor_layers: 1
+  predictor_heads: 2
+  sigreg_projections: 8
+  # Two-step smoke runs exercise cosine/EMA without a long warmup.
+  lr_warmup_steps: 0
+trainer:
+  max_epochs: 1
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  limit_train_batches: 2
+  limit_val_batches: 1
+  limit_test_batches: 1
+  enable_progress_bar: false
+callbacks:
+  rich_progress_bar: null
+  model_summary: null

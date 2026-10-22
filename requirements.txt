@@ -9,3 +9,7 @@ hydra-optuna-sweeper==1.2.0
 rootutils>=1.0.7,<2
 rich>=13,<15
 numpy>=1.26,<3
+einops==0.8.1
+transformers>=4.45,<5
+huggingface-hub>=0.26,<1
+safetensors>=0.4.5,<1

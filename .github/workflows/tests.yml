@@ -16,8 +16,44 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
-      - run: uv sync --frozen --python ${{ matrix.python }}
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pytest
+      - run: uv sync --frozen --extra hear --python ${{ matrix.python }}
+      - run: uv run --extra hear ruff check .
+      - run: uv run --extra hear ruff format --check .
+      - run: uv run --extra hear pytest
       - run: uv run python -m src.train experiment=smoke
+      - run: uv run python -m src.train experiment=upstream_smoke
+      - uses: actions/checkout@v4
+        if: matrix.python == '3.12'
+        with:
+          repository: labhamlet/wavjepa
+          ref: 6f4e1b1f18316c50768c8523f325ccffeaa6985b
+          path: .upstream-wavjepa
+          persist-credentials: false
+      - run: uv run python -m src.verify_upstream --upstream .upstream-wavjepa
+        if: matrix.python == '3.12'
+  hear:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.11"
+      - run: uv sync --frozen --extra hear --python 3.11
+      - run: uv venv --python 3.11 artifacts/hear-env
+      - run: >-
+          uv pip install --python artifacts/hear-env/bin/python --torch-backend cpu
+          -r evaluation/hear/requirements.txt
+      - run: >-
+          uv pip install --python artifacts/hear-env/bin/python --no-deps
+          'heareval @ git+https://github.com/hearbenchmark/hear-eval-kit.git@855964977238e89dfc76394aa11c37010edb6f20'
+      - run: >-
+          uv run --frozen --extra hear python -m evaluation.hear.make_smoke
+          --output artifacts/hear-smoke
+      - run: >-
+          artifacts/hear-env/bin/python evaluation/hear/run.py
+          artifacts/hear-smoke/export-scene artifacts/hear-smoke/export-event
+          --grid-points 1 --workers 0
+        env:
+          OMP_NUM_THREADS: "1"

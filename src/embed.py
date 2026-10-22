@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data.wav_datamodule import WAVManifestDataset, _manifest_paths
+from src.dynamics_inference import load_model as load_dynamics_model
 from src.inference import load_model
 from src.utils.runtime import atomic_json, file_sha256
 
@@ -20,6 +21,7 @@ def extract_embeddings(
     num_samples: int,
     batch_size: int = 16,
     device: str = "cpu",
+    model_family: str = "legacy",
 ) -> dict:
     """Extract one vector per hierarchy level/file, plus the protected vector.
 
@@ -30,27 +32,48 @@ def extract_embeddings(
         raise ValueError("batch_size must be a positive integer")
     checkpoint = Path(checkpoint).expanduser().resolve(strict=True)
     manifest = Path(manifest).expanduser().resolve(strict=True)
-    model = load_model(checkpoint, device=device)
-    sample_rate = model.hparams.input_sample_rate
+    if model_family not in {"legacy", "dynamics"}:
+        raise ValueError("model_family must be legacy or dynamics")
+    model = (load_dynamics_model if model_family == "dynamics" else load_model)(
+        checkpoint, device=device
+    )
+    sample_rate = (
+        model.backbone.sample_rate
+        if model_family == "dynamics"
+        else model.hparams.input_sample_rate
+    )
     if sample_rate is None:
         raise ValueError("Checkpoint has no input sample rate; use one created by src.train")
-    divisor = model.encoder.patch_size * model.encoder.total_pool_factor
+    divisor = (
+        model.window_samples
+        if model_family == "dynamics"
+        else model.encoder.patch_size * model.encoder.total_pool_factor
+    )
     if type(num_samples) is not int or num_samples < divisor or num_samples % divisor:
         raise ValueError(f"num_samples must be a positive multiple of {divisor}")
     paths = _manifest_paths(manifest)
-    dataset = WAVManifestDataset(paths, sample_rate=sample_rate, num_samples=num_samples)
+    dataset = WAVManifestDataset(
+        paths,
+        sample_rate=sample_rate,
+        num_samples=num_samples,
+        require_full_length=model_family == "dynamics",
+    )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     directory = Path(output).expanduser()
     directory.mkdir(parents=True, exist_ok=False)
     record = {
         "schema_version": 1,
+        "model_family": model_family,
         "status": "running",
         "checkpoint_sha256": file_sha256(checkpoint),
         "manifest_sha256": file_sha256(manifest),
         "sample_rate": sample_rate,
         "num_samples": num_samples,
         "pooling": "temporal_mean",
-        "level_widths": list(model.encoder.widths),
+        "temporal_grid": "training_strides" if model_family == "dynamics" else "encoder_tokens",
+        "level_widths": [model.backbone.embedding_dim] * 3
+        if model_family == "dynamics"
+        else list(model.encoder.widths),
         "examples": len(dataset),
         "shards": 0,
     }
@@ -60,7 +83,12 @@ def extract_embeddings(
         with (directory / "index.jsonl").open("x", encoding="utf-8") as index:
             with torch.inference_mode():
                 for number, batch in enumerate(loader):
-                    encoded = model.encode(batch["waveform"].to(device))
+                    waveform = batch["waveform"].to(device)
+                    encoded = (
+                        {"levels": model.encode(waveform, subsample=True), "protected": None}
+                        if model_family == "dynamics"
+                        else model.encode(waveform)
+                    )
                     shard = {
                         "levels": [level.mean(dim=1).cpu() for level in encoded["levels"]],
                         "protected": encoded["protected"].mean(dim=1).cpu()
@@ -110,6 +138,12 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--model-family",
+        choices=("legacy", "dynamics"),
+        default="legacy",
+        help="Checkpoint family; dynamics uses the official WavJEPA backbone and training strides",
+    )
     parser.add_argument("--num-threads", type=int, default=1)
     args = parser.parse_args()
     if args.num_threads < 1:

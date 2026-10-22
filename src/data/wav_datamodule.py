@@ -3,7 +3,9 @@
 Every nonempty JSONL line must be an object with a ``path`` field. Relative paths
 are resolved against that manifest's directory. Files must be uncompressed
 16-bit PCM mono WAV at the configured sample rate. Inputs are cropped from the
-start or zero-padded to ``num_samples``. Users remain responsible for splitting
+start or zero-padded to ``num_samples`` unless ``require_full_length`` is enabled.
+Forecasting must enable this option so padding cannot become a future target.
+Users remain responsible for splitting
 by recording, speaker, subject, or other appropriate independent unit: distinct
 file paths alone cannot establish statistically independent splits.
 """
@@ -14,12 +16,20 @@ import array
 import json
 import sys
 import wave
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import (
+    BatchSampler,
+    DataLoader,
+    Dataset,
+    RandomSampler,
+    Sampler,
+    SequentialSampler,
+)
 
 
 @dataclass(frozen=True)
@@ -152,16 +162,34 @@ def _inspect_wav(path: Path, sample_rate: int) -> int:
 
 class WAVManifestDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(
-        self, paths: list[Path], sample_rate: int = 16_000, num_samples: int = 1024
+        self,
+        paths: list[Path],
+        sample_rate: int = 16_000,
+        num_samples: int = 1024,
+        require_full_length: bool = False,
     ) -> None:
         if not paths:
             raise ValueError("WAV dataset must not be empty")
         _positive_integer(sample_rate, "sample_rate")
         _positive_integer(num_samples, "num_samples")
+        if not isinstance(require_full_length, bool):
+            raise ValueError("require_full_length must be a boolean")
         self.paths = [Path(path) for path in paths]
         self.sample_rate = sample_rate
         self.num_samples = num_samples
+        self.require_full_length = require_full_length
         self.frame_counts = [_inspect_wav(path, sample_rate) for path in self.paths]
+        if require_full_length:
+            for path, frames in zip(self.paths, self.frame_counts, strict=True):
+                self._require_length(path, frames)
+
+    def _require_length(self, path: Path, frames: int) -> None:
+        if self.require_full_length and frames < self.num_samples:
+            raise ValueError(
+                f"Forecasting requires at least {self.num_samples} real samples "
+                f"({self.num_samples / self.sample_rate:g} seconds), got {frames}: {path}; "
+                "padding cannot be used as future audio"
+            )
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -171,6 +199,7 @@ class WAVManifestDataset(Dataset[dict[str, torch.Tensor]]):
         try:
             with wave.open(str(path), "rb") as handle:
                 _validate_wav(handle, path, self.sample_rate)
+                self._require_length(path, handle.getnframes())
                 requested = min(self.num_samples, handle.getnframes())
                 raw = handle.readframes(requested)
         except (OSError, EOFError, wave.Error) as error:
@@ -184,6 +213,40 @@ class WAVManifestDataset(Dataset[dict[str, torch.Tensor]]):
         waveform = torch.zeros(self.num_samples, dtype=torch.float32)
         waveform[: len(values)] = torch.tensor(values, dtype=torch.float32) / 32768.0
         return {"waveform": waveform}
+
+
+class _MinimumBatchSampler(BatchSampler):
+    """Merge an undersized final batch into its predecessor without losing rows.
+
+    This preserves the underlying sampler's order, including shuffled training
+    order. The final batch may exceed ``batch_size`` by ``minimum_batch_size - 1``.
+    Unlike ``drop_last``, every validation/test example is retained.
+    """
+
+    def __init__(self, sampler: Sampler[int], batch_size: int, minimum_batch_size: int) -> None:
+        _positive_integer(minimum_batch_size, "minimum_batch_size")
+        if batch_size < minimum_batch_size or len(sampler) < minimum_batch_size:
+            raise ValueError("batch size and dataset size must be >= minimum_batch_size")
+        super().__init__(sampler, batch_size, drop_last=False)
+        self.minimum_batch_size = minimum_batch_size
+
+    def __iter__(self) -> Iterator[list[int]]:
+        pending = None
+        for batch in super().__iter__():
+            if pending is None:
+                pending = batch
+            elif len(batch) < self.minimum_batch_size:
+                pending.extend(batch)
+            else:
+                yield pending
+                pending = batch
+        if pending is not None:
+            yield pending
+
+    def __len__(self) -> int:
+        batches = super().__len__()
+        remainder = len(self.sampler) % self.batch_size
+        return batches - int(batches > 1 and 0 < remainder < self.minimum_batch_size)
 
 
 class WAVManifestDataModule(L.LightningDataModule):
@@ -206,17 +269,24 @@ class WAVManifestDataModule(L.LightningDataModule):
         pin_memory: bool = False,
         persistent_workers: bool = False,
         prefetch_factor: int | None = None,
+        require_full_length: bool = False,
+        minimum_batch_size: int = 1,
     ) -> None:
         super().__init__()
         for name, value in (
             ("batch_size", batch_size),
             ("sample_rate", sample_rate),
             ("num_samples", num_samples),
+            ("minimum_batch_size", minimum_batch_size),
         ):
             _positive_integer(value, name)
         _positive_integer(num_workers, "num_workers", minimum=0)
+        if batch_size < minimum_batch_size:
+            raise ValueError("batch_size must be >= minimum_batch_size")
         if not isinstance(pin_memory, bool) or not isinstance(persistent_workers, bool):
             raise ValueError("pin_memory and persistent_workers must be booleans")
+        if not isinstance(require_full_length, bool):
+            raise ValueError("require_full_length must be a boolean")
         if prefetch_factor is not None:
             _positive_integer(prefetch_factor, "prefetch_factor")
         if num_workers == 0 and (persistent_workers or prefetch_factor is not None):
@@ -232,10 +302,19 @@ class WAVManifestDataModule(L.LightningDataModule):
         )
         datasets = {
             split: WAVManifestDataset(
-                [record.path for record in rows], self.hparams.sample_rate, self.hparams.num_samples
+                [record.path for record in rows],
+                self.hparams.sample_rate,
+                self.hparams.num_samples,
+                require_full_length=self.hparams.require_full_length,
             )
             for split, rows in entries.items()
         }
+        for split, dataset in datasets.items():
+            if len(dataset) < self.hparams.minimum_batch_size:
+                raise ValueError(
+                    f"{split} split has {len(dataset)} recordings; minimum_batch_size="
+                    f"{self.hparams.minimum_batch_size} requires at least that many recordings"
+                )
         # Assign only after every split validates, avoiding a half-initialized module.
         for split, dataset in datasets.items():
             setattr(
@@ -247,15 +326,19 @@ class WAVManifestDataModule(L.LightningDataModule):
     def _loader(self, dataset: WAVManifestDataset | None, shuffle: bool) -> DataLoader:
         if dataset is None:
             raise RuntimeError("Call setup() before requesting a dataloader")
-        return DataLoader(
-            dataset,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            shuffle=shuffle,
-            pin_memory=self.hparams.pin_memory,
-            persistent_workers=self.hparams.persistent_workers,
-            prefetch_factor=self.hparams.prefetch_factor,
-        )
+        options = {
+            "num_workers": self.hparams.num_workers,
+            "pin_memory": self.hparams.pin_memory,
+            "persistent_workers": self.hparams.persistent_workers,
+            "prefetch_factor": self.hparams.prefetch_factor,
+        }
+        if self.hparams.minimum_batch_size > 1:
+            sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+            batch_sampler = _MinimumBatchSampler(
+                sampler, self.hparams.batch_size, self.hparams.minimum_batch_size
+            )
+            return DataLoader(dataset, batch_sampler=batch_sampler, **options)
+        return DataLoader(dataset, batch_size=self.hparams.batch_size, shuffle=shuffle, **options)
 
     def train_dataloader(self) -> DataLoader:
         return self._loader(self.data_train, shuffle=True)

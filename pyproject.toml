@@ -13,7 +13,14 @@ dependencies = [
   "rich>=13,<15",
   "torchmetrics>=1.6,<2",
   "numpy>=1.26,<3",
+  "einops==0.8.1",
+  "transformers>=4.45,<5",
+  "huggingface-hub>=0.26,<1",
+  "safetensors>=0.4.5,<1",
 ]
+
+[project.optional-dependencies]
+hear = ["soundfile>=0.12,<1"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.12,<1", "pre-commit>=4,<5"]
@@ -30,6 +37,7 @@ markers = ["integration: short local Lightning training and checkpoint checks"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["src/vendor", "tests/fixtures/h_jepa"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

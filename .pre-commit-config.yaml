@@ -2,6 +2,8 @@
 # project's locked Ruff version instead of competing Black/isort formatters.
 default_language_version:
   python: python3
+# Keep pinned third-party formatting and source-diff provenance intact.
+exclude: ^(src/vendor/|tests/fixtures/h_jepa/)
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

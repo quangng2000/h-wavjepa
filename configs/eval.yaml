@@ -9,7 +9,7 @@ defaults:
   - paths: default
   - extras: default
   - hydra: default
-  - experiment: null
+  - experiment: upstream_smoke
   - optional local: default
   - debug: null
 

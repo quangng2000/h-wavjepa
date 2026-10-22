@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - override /data: wav
+  - override /model: upstream_hierarchical
+
+tags: [upstream-wavjepa, hierarchical, future-dynamics, research]
+num_threads: 4
+data:
+  # Nine chronological 2.01-second windows: 18.09 REAL seconds per recording.
+  # A standard ten-second AudioSet clip is insufficient for this example preset.
+  num_samples: 289440
+  require_full_length: true
+  batch_size: 2
+  # SIGReg needs >=2 examples. Merge singleton tails into the previous batch;
+  # no validation/test recordings are dropped (a final batch may contain 3).
+  minimum_batch_size: 2
+  num_workers: 0
+trainer:
+  max_epochs: 100
+  devices: 1
+  precision: 32-true
+  log_every_n_steps: 10

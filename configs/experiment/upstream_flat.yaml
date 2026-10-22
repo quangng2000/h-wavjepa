@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - upstream_hierarchical
+  - _self_
+
+tags: [upstream-wavjepa, flat, multi-horizon, research]
+model:
+  # Same future timestamps/history/backbone; target spaces differ without G2/G3.
+  hierarchy: false

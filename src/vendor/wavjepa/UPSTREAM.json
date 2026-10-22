@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/labhamlet/wavjepa",
+  "commit": "6f4e1b1f18316c50768c8523f325ccffeaa6985b",
+  "source_sha256": {
+    "wavjepa/jepa.py": "e89e13c56262a94bfa2233094880b33db5f31d1de83c927f51178909b9707e69",
+    "wavjepa/functions.py": "e535b6e48677841af30420e49fdf8ca0e478d4fa27fbe6898361e359d875199c",
+    "wavjepa/pos_embed.py": "e1be3bd33db28b3243a03acc0e9bfa7c31186a96c27535a053db252dde1ac68a",
+    "wavjepa/masking.py": "207b0b52d19ab12509b7469deebb313f3a92496ce3141d63d48ac979d603896b",
+    "wavjepa/audio_masking.py": "efe9d7c135d1942e8fc41014919ad2a86e382cf7c4f0bbc59dee2aedbacccbcf",
+    "wavjepa/extractors/audio_feature_extractor.py": "f744f969b65f171d1d8580de026f4f0f0bd34d65f598dd508f105f3797cfeda8",
+    "wavjepa/extractors/audio_extractor.py": "27428e13c008aa7c2783c1a2f3e1bce8146cd25c910885d0ff4e4b3575fc90f4",
+    "wavjepa/types/wavjepa_configs.py": "a87e90dc32fb68b20c7862cf4f838a5a3ddf295d04a94d968a7b2d77382ccd6c",
+    "LICENSE": "aa0676d4054c78e3824310b77bc382f53c4c9facc4ebaa85258fc9bcbece7ba3"
+  },
+  "modifications": [
+    "Namespace imports rewritten from wavjepa to src.vendor.wavjepa.",
+    "pytorch_lightning import replaced with lightning.pytorch.",
+    "Package initializers expose only core components, omitting denoiser and optional data dependencies.",
+    "Incorrect ForwardReturn alias in upstream types initializer corrected.",
+    "Trailing source newlines normalized.",
+    "TimeInverseBlockMasker and compute_mask_indices accept an optional local NumPy Generator; masker retries capped at 1000 by default.",
+    "Original EMA teacher explicitly remains in eval mode after initialization and train() calls.",
+    "JEPA accepts an optional positive integer target_length so 32160 samples are preserved exactly rather than truncated through floating-point seconds; default upstream timing is unchanged."
+  ],
+  "scope": "Core JEPA, convolutional feature extractor, masking, initialization and positional utilities; no evaluation vendors or data_modules.",
+  "third_party_licenses": {
+    "pos_embed": "Retains Meta copyright and AudioMAE provenance; LICENSE-AudioMAE is CC-BY-NC-4.0. Exact provenance unresolved; commercial clearance not claimed."
+  }
+}

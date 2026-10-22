@@ -15,7 +15,9 @@ defaults:
 
   # experiment configs allow for version control of specific hyperparameters
   # e.g. best hyperparameters for given model and datamodule
-  - experiment: null
+  # The no-argument command runs a small official-backbone smoke experiment.
+  # Legacy models remain explicit experiment=smoke/hwavjepa/audio controls.
+  - experiment: upstream_smoke
 
   # config for hyperparameter optimization
   - hparams_search: null

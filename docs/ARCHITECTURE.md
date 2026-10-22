@@ -1,5 +1,8 @@
 # Architecture
 
+This page describes the earlier independent prototype (`hwavjepa`/`audio`).
+The official-WavJEPA-backed route is documented in [Upstream dynamics](UPSTREAM_DYNAMICS.md).
+
 ## Library boundary
 
 PyTorch supplies tensors, autograd, layers, Transformer predictors, data loading and AdamW. Lightning owns training, precision/device handling, accumulation and checkpoints. Hydra/Optuna compose and search configurations. The actual Lightning–Hydra template supplies orchestration and utilities. Project code implements the hierarchy, masking, protected path, objective, data contracts and small operational guards—not a replacement framework.

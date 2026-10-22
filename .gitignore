@@ -15,6 +15,7 @@ htmlcov/
 *.ckpt
 *.pt
 *.pth
+*.safetensors
 configs/local/*.yaml
 !configs/local/.gitkeep
 build/

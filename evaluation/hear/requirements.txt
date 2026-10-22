@@ -1,0 +1,22 @@
+# Evaluation-only environment; do not install into the training environment.
+# Python 3.11. Official HEAR probes need the pre-2.0 Lightning API.
+setuptools==75.8.2
+torch==2.2.2
+pytorch-lightning==1.9.5
+torchmetrics==0.11.4
+numpy==1.26.4
+pandas==1.5.3
+scipy==1.11.4
+scikit-learn==1.5.2
+soundfile==0.12.1
+librosa==0.10.2.post1
+numba==0.60.0
+dcase-util==0.2.20
+sed-eval==0.2.1
+intervaltree==3.1.0
+more-itertools==10.5.0
+python-slugify==8.0.4
+torchinfo==1.8.0
+tqdm==4.66.5
+click==8.1.7
+nvidia-ml-py==12.560.30

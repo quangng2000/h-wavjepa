@@ -1,94 +1,76 @@
 # H-WavJEPA
 
-Learn audio representations at three temporal scales with **PyTorch Lightning + Hydra**.
-
 [![Tests](https://github.com/quangng2000/h-wavjepa/actions/workflows/tests.yml/badge.svg)](https://github.com/quangng2000/h-wavjepa/actions/workflows/tests.yml)
-[![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)](pyproject.toml)
-[![Lightning–Hydra](https://img.shields.io/badge/template-Lightning--Hydra-792ee5)](https://github.com/ashleve/lightning-hydra-template)
+[![Lightning](https://img.shields.io/badge/Lightning-792EE5?logo=lightning&logoColor=white)](https://lightning.ai/docs/pytorch/stable/)
+[![Hydra](https://img.shields.io/badge/config-Hydra-89b8cd)](https://hydra.cc/)
 
-[Quickstart](#quickstart) · [Train](#train-on-audio) · [Experiments](#experiments-with-hydra) · [Docs](#documentation)
+Learn **three latent audio spaces at different prediction horizons** using the official [WavJEPA](https://github.com/labhamlet/wavjepa) backbone, [H-JEPA](https://github.com/kevinghst/H-JEPA) SIGReg, and the [Lightning–Hydra template](docs/TEMPLATE.md).
 
-<a id="proposed-three-space-architecture"></a>
+The model retains WavJEPA's masked objective and adds two learned abstractions and three future predictors. Released WavJEPA weights can initialize the backbone; the new hierarchy starts fresh. This is a research implementation with no demonstrated benchmark improvement yet.
 
-![Three learned latent spaces with separate predictors, EMA targets, and per-level losses](docs/figures/h-wavjepa-three-latent-spaces.png)
+![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
-*Proposed forecasting design; horizons and token counts are illustrative. The current research prototype uses [masked prediction](docs/ARCHITECTURE.md). No pretrained weights or benchmark gains are claimed.*
+*Conceptual sketch. The implementation uses completed 2.01-second windows, pointwise upper encoders, and configurable horizons. See the [architecture and exact temporal grids](docs/UPSTREAM_DYNAMICS.md).*
 
-## Quickstart
+## Quick start
 
-Requires **Python 3.11–3.13** and [uv](https://docs.astral.sh/uv/).
+Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/quangng2000/h-wavjepa.git
-cd h-wavjepa
-uv sync --frozen
-uv run python -m src.train experiment=smoke
+uv sync --frozen --extra hear
+uv run python -m src.train           # tiny official-backbone smoke run
+uv run --extra hear pytest
 ```
 
-The smoke run uses generated audio on CPU. No dataset download or account needed.
+The smoke run uses generated audio and random weights; it downloads no model or dataset.
 
-## Train on audio
+## Train with pretrained WavJEPA
 
-Prepare `train.jsonl`, `val.jsonl`, and `test.jsonl` with **mono, 16-bit PCM, 16 kHz WAV** files. Paths are relative to each manifest.
+Create recording-disjoint `train.jsonl`, `val.jsonl`, and `test.jsonl` manifests:
 
 ```json
 {"path": "audio/example.wav", "group_id": "speaker-001"}
 ```
 
 ```bash
-uv run python -m src.train experiment=audio \
-  data.train_manifest=/data/train.jsonl \
-  data.val_manifest=/data/val.jsonl \
-  data.test_manifest=/data/test.jsonl
+uv run python -m src.train experiment=upstream_pretrained \
+  data.train_manifest=/absolute/path/train.jsonl \
+  data.val_manifest=/absolute/path/val.jsonl \
+  data.test_manifest=/absolute/path/test.jsonl
 ```
 
-All three manifests are required. Keep recordings and speakers separate across splits. Clips are cropped or padded to eight seconds without resampling. See [data preparation](docs/USAGE.md#real-audio).
+This explicitly downloads the pinned, checksum-verified base weights (~785 MB), without executing Hub Python code. For offline use, set `model.backbone.pretrained=false model.backbone.pretrained_path=/path/model.safetensors`.
 
-## Experiments with Hydra
+Inputs are mono PCM16 WAV at 16 kHz. The example preset requires **18.09 seconds of contiguous audio per file**, at least two files per split, and single-device FP32. Short training clips are rejected. CPU is tested; CUDA performance is unvalidated.
 
-Select a config, override values, or sweep seeds:
+## Experiments and evaluation
 
-```bash
-# Choose an experiment
-uv run python -m src.train experiment=hwavjepa
+| Experiment | Purpose |
+| --- | --- |
+| `upstream_pretrained` | Three spaces, initialized from released WavJEPA weights |
+| `upstream_hierarchical` | Same architecture, random initialization |
+| `upstream_flat` | Shared-space multi-horizon control |
+| `upstream_baseline` | Original masked-loss adaptation control |
 
-# Override hyperparameters
-uv run python -m src.train experiment=hwavjepa \
-  trainer.max_epochs=20 model.optimizer.lr=0.0003
+Use identical data, initialization and budgets for comparisons. Presets use warmup/cosine learning rates and annealed EMA. Runs and checkpoints live in `logs/train/runs/`; add `ckpt_path=/path/last.ckpt` to resume the same planned schedule.
 
-# Sweep seeds
-uv run python -m src.train --multirun experiment=smoke seed=1,2,3
-```
+- **Downstream quality:** [HEAR export and official evaluation](docs/HEAR.md), separately for low, medium, high, or backbone tokens.
+- **Objective diagnostics:** `uv run python -m src.eval experiment=upstream_hierarchical ckpt_path=/path/last.ckpt` with the same data overrides.
+- **Feature export:** `uv run python -m src.embed --model-family dynamics --checkpoint /path/last.ckpt --manifest /path/test.jsonl --output /new/output --num-samples 289440`.
 
-Configs live in [`configs/experiment/`](configs/experiment/). Configs, CSV metrics, and checkpoints are saved under `logs/train/runs/`; sweeps use `logs/train/multiruns/`.
-
-## Project structure
+## Project guide
 
 ```text
-configs/       Hydra configs: data, models, trainers, experiments
-src/
-  data/        Datasets and Lightning DataModules
-  models/      Encoders, predictors, and LightningModules
-  objectives/  Training losses
-  train.py     Training entry point
-  eval.py      Evaluation entry point
-tests/         Unit and integration tests
-docs/          Guides and research notes
-logs/          Generated run artifacts (gitignored)
+configs/             Hydra data, model, trainer and experiment presets
+src/vendor/wavjepa/  Pinned official training core
+src/models/          Audio hierarchy and forecasting integration
+src/hear_api.py      HEAR embedding interface
+evaluation/hear/     Isolated official evaluation runner
+tests/              Model, causality, checkpoint and integration checks
 ```
 
-## Documentation
+[Design and training details](docs/UPSTREAM_DYNAMICS.md) · [Validation](docs/VALIDATION.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
-- [Usage](docs/USAGE.md) — data, resume, evaluation, and embeddings
-- [Architecture](docs/ARCHITECTURE.md) — hierarchy, masking, and objectives
-- [Operations](docs/OPERATIONS.md) — checkpoints and hardware support
-- [Theory](docs/THEORY_BOUNDARY.md) — assumptions and proof boundaries
-- [Lightning–Hydra integration](docs/TEMPLATE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+The earlier independent model remains under explicit legacy experiments (`smoke`, `audio`, `hwavjepa`, `flat`); see [legacy usage](docs/USAGE.md). Its checkpoints remain distinct. Retained AudioMAE positional utilities carry their original noncommercial notice.
 
-## Development
-
-```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run pytest
-```
+Development: `uv run ruff check .` and `uv run ruff format --check .`.

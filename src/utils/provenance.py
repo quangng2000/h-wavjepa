@@ -55,4 +55,17 @@ def write_provenance(cfg: DictConfig, model: lightning.LightningModule) -> None:
             if key.endswith("_manifest") and value
         },
     }
+    if callable(getattr(model, "checkpoint_metadata", None)):
+        metadata["model_contract"] = model.checkpoint_metadata()
+    backbone = getattr(model, "backbone", None)
+    if backbone is not None and hasattr(backbone, "source_commit"):
+        metadata["upstream_initialization"] = {
+            "source_commit": backbone.source_commit,
+            "weights": "resume"
+            if cfg.get("ckpt_path")
+            else ("checkpoint" if backbone.checkpoint_sha256 else "random"),
+            "checkpoint_sha256": metadata["input_checkpoint_sha256"]
+            if cfg.get("ckpt_path")
+            else backbone.checkpoint_sha256,
+        }
     atomic_json(output_dir / "provenance.json", metadata)

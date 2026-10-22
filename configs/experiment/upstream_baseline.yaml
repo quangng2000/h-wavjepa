@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - upstream_hierarchical
+  - _self_
+
+tags: [upstream-wavjepa, masked-only-control, research]
+model:
+  # Uses the upstream masked objective under our controlled data/trainer harness.
+  # This is not a claim to reproduce the paper's full published training recipe.
+  hierarchy: false
+  prediction_weights: [0.0, 0.0, 0.0]
+  regularization_weight: 0.0

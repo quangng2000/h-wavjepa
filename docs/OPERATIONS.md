@@ -1,5 +1,9 @@
 # Operational contract
 
+Model-specific examples below describe the legacy prototype. The upstream-backed
+model has a separate checkpoint schema, single-device FP32 limits and inference
+API; see [Upstream dynamics](UPSTREAM_DYNAMICS.md).
+
 This is an executable research training/evaluation/extraction workflow. Production readiness still requires workload-specific acceptance tests for deployed reliability, resources and audio representation quality.
 
 ## Safeguards

@@ -35,7 +35,7 @@ from src.utils import (  # noqa: E402 -- rootutils must establish the project im
     task_wrapper,
     write_provenance,
 )
-from src.utils.runtime import record_run, validate_config
+from src.utils.runtime import model_config_for_checkpoint, record_run, validate_config
 
 log = RankedLogger(__name__, rank_zero_only=True)
 
@@ -70,7 +70,9 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         if cfg.model._target_ == "src.models.hwavjepa_module.HWavJEPAModule"
         else {}
     )
-    model: LightningModule = hydra.utils.instantiate(cfg.model, **model_kwargs)
+    model: LightningModule = hydra.utils.instantiate(
+        model_config_for_checkpoint(cfg), **model_kwargs
+    )
 
     log.info("Instantiating loggers...")
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
