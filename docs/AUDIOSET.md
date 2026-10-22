@@ -128,7 +128,11 @@ observed time: **64 total**, with FP32 statistics inside mixed-precision trainin
 it does not increase a regularizer invocation's population. If GPU memory
 requires a smaller per-rank batch, report and validate that changed population.
 
-Validation runs periodically during training. Regularizer validation statistics
+The H100 preset validates every 5,000 training batches. Checkpoints use step-based
+filenames and save the best validation model plus `last.ckpt` after validation;
+there is no automatic checkpoint before the first validation. Early stopping is
+disabled so comparisons use the planned optimizer-step budget.
+Regularizer validation statistics
 are local to each rank, so their population differs from training's global
 population. Distributed held-out sampling can pad the tail; it is suitable for
 training diagnostics, but final metrics should use one device as below.
