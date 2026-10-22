@@ -26,7 +26,7 @@ The smoke run downloads no data or weights. Tests cover model, gradient, checkpo
 
 ## Train on AudioSet
 
-Use the [CPU preparation guide](docs/PREPARE_AUDIOSET.md) to download the pinned WavJEPA AudioSet source, convert it to mono PCM16 WAV at 16 kHz, and build recording-disjoint JSONL manifests before renting GPUs:
+Use the [CPU preparation guide](docs/PREPARE_AUDIOSET.md) to download the pinned WavJEPA AudioSet source, convert it to mono PCM16 WAV at 16 kHz, and build recording-disjoint JSONL manifests before renting GPUs. A [rolling S3 stager](docs/STAGE_AUDIOSET.md) prepares the full corpus on a smaller CPU disk:
 
 ```json
 {"path": "audio/example.wav", "recording_id": "source-recording-id"}

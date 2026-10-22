@@ -71,11 +71,12 @@ python3 -m src.prepare_audioset --output /data/audioset --workers 2
 ```
 
 Full preparation transfers about 2.46 TB of source FLAC archives. A 250 GiB node
-disk cannot hold the complete prepared corpus. This command currently expects
-all prepared WAVs to remain on local storage; it does not upload, evict or stream
-training data from object storage. Provision enough disk, or implement and test
-a shard-backed training loader before attempting the full corpus on a smaller
-host. Do not interpret a successful pilot as a completed dataset.
+disk cannot hold the complete prepared corpus. For a smaller CPU host, use the
+[rolling object-storage stager](STAGE_AUDIOSET.md), which uploads and verifies
+one source at a time before removing its local WAVs. The command above retains
+all WAVs locally. The training loader still requires local WAVs; object-storage
+staging does not add streaming training. Do not interpret a successful pilot as
+a completed dataset.
 
 ## Resume, reports and training preflight
 

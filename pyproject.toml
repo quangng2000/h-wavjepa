@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hear = ["soundfile>=0.12,<1"]
+data = ["boto3>=1.43.118,<2"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.12,<1", "pre-commit>=4,<5"]

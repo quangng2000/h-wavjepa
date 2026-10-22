@@ -94,6 +94,14 @@ full-corpus completion or a GPU throughput measurement. The
 records the source hashes, counts, runtime and limitations. See the
 [preparation guide](PREPARE_AUDIOSET.md) for reproducible commands.
 
+The rolling S3 stager passed all 47 preparation and staging tests on the CPU
+host. Its real pilot uploaded one 625,715,200-byte training shard and verified
+the full object SHA256 before removing temporary WAVs. A second invocation
+preserved the verified index without re-uploading the source. The
+[staging evidence](validation/audioset-staging-pilot-2026-10-22.json) records
+these checks; its index remains explicitly partial at one of 889 sources.
+See the [staging guide](STAGE_AUDIOSET.md) for storage and resume requirements.
+
 ## Two-H100 smoke
 
 On 22 October 2026, commit `4a9b09a80b4e1fac2bb63a856606574a96e78e8f`

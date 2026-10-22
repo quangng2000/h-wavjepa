@@ -1,0 +1,80 @@
+{
+  "date": "2026-10-22",
+  "status": "pilot_only",
+  "tests": {
+    "passed": 47,
+    "skipped": 0
+  },
+  "stage_script_sha256": "a30b18c115772e2e4ffcc4df93335114962e127dc0174a79bc700c97b8f95daa",
+  "resume": {
+    "verified_index_unchanged": true,
+    "no_source_reupload": true,
+    "working_source_files_removed": true,
+    "seconds": 3.677
+  },
+  "index": {
+    "expected_sources": 889,
+    "full_cohort_sources": 889,
+    "metadata": [
+      {
+        "bytes": 1211931,
+        "sha256": "3b83e5ff9ed72cfda37d4e36ce08250e107c1ea70f109f6ab6668ac200db5e94"
+      },
+      {
+        "bytes": 1143389,
+        "sha256": "f7055f53935f70e74e39494a5c8c4c78f1700fce275028bd36e31186f33d45db"
+      },
+      {
+        "bytes": 101468408,
+        "sha256": "bb2dfd5e4f1ced39db9480633c510f813d7899f4b7472aa83a411b4a43a12698"
+      }
+    ],
+    "revision": "5a2fa42a1506470d275a47ff8e1fdac5b364e6ef",
+    "schema": 1,
+    "shards": [
+      {
+        "bytes": 625715200,
+        "provenance_sha256": "4776cf507df9263dc419ce4985e0ec4ae1818aa3c07371d1834fee95a875c7af",
+        "rejections": {
+          "unbal_train000": 47
+        },
+        "sha256": "6689537e91903ee181b5afa843c07d3fb2bae1bc378845306b06efcf36e12662",
+        "source": "unbal_train000",
+        "splits": {
+          "test": {
+            "bytes": 0,
+            "clips": 0,
+            "manifest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "samples": 0
+          },
+          "train": {
+            "bytes": 623010500,
+            "clips": 1953,
+            "manifest_sha256": "745f71d03dd970df378a30c7e5c96150f18881a035c7f25180af82ae3d9f198c",
+            "samples": 311429083
+          },
+          "val": {
+            "bytes": 0,
+            "clips": 0,
+            "manifest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "samples": 0
+          }
+        }
+      }
+    ],
+    "split_counts": {
+      "test": 0,
+      "train": 1953,
+      "val": 0
+    },
+    "status": "partial",
+    "stop_reason": null,
+    "stored_payload_bytes": 729538928,
+    "verified_sources": 1
+  },
+  "limitations": [
+    "One complete training source of 889; full cohort not prepared.",
+    "Original 2080-clip pilot remains preserved separately.",
+    "Object storage staging does not yet provide a streaming training loader."
+  ]
+}
