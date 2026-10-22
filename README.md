@@ -4,6 +4,12 @@ Train hierarchical audio representations at three temporal resolutions, with an 
 
 Includes real-WAV training, checkpoint resume, repeatable evaluation, and batch embedding extraction. CPU workflows are tested; useful downstream representations and accelerator performance still require experiments. This is not a pretrained model or an official WavJEPA reproduction.
 
+## Proposed three-space architecture
+
+![Proposed H-WavJEPA architecture with fine, intermediate, and coarse latent spaces, separate predictors, EMA target encoders, and a weighted sum of per-level losses](docs/figures/h-wavjepa-three-latent-spaces.png)
+
+Conceptual forecasting design with three learned latent spaces. The 80 / 320 / 1,280 ms horizons and token counts are illustrative; see the [architecture documentation](docs/ARCHITECTURE.md) for the implemented objectives and their scope.
+
 ## Install and check
 
 Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/):
