@@ -254,11 +254,13 @@ class JEPA(pl.LightningModule):
         # They have for audioset -> instance_norm_target_layer: true
         # They have for audioset -> layer_norm_targets : true
         # So this is the way following the data2vec2 paper for audio.
-        stacked_outputs = torch.stack(layer_outputs, )  # [num_layers, batch, seq_len, features]
+        stacked_outputs = torch.stack(layer_outputs, ).float()  # [num_layers, batch, seq_len, features]
         transposed = stacked_outputs.transpose(2, 3)   # [num_layers, batch, features, seq_len]
 
         # Apply instance norm to all layers simultaneously
-        normalized = F.instance_norm(transposed)       # [num_layers, batch, features, seq_len]
+        # Keep target and online readout statistics in FP32 under autocast.
+        with torch.autocast(device_type=transposed.device.type, enabled=False):
+            normalized = F.instance_norm(transposed)   # [num_layers, batch, features, seq_len]
         normalized = normalized.transpose(2, 3)        # [num_layers, batch, seq_len, features]
 
         # Compute mean across layers
@@ -356,7 +358,8 @@ class JEPA(pl.LightningModule):
         B, N, _ = target_indices.shape
         D = pred.shape[-1]
 
-        pred_reshaped = pred.view(B, N, -1, D)
+        pred_reshaped = pred.float().view(B, N, -1, D)
+        target = target.float()
 
         # This makes it broadcastable to the shape of pred_reshaped [B, N, T, D] during the loss
         
@@ -448,7 +451,10 @@ class JEPA(pl.LightningModule):
         src_key_padding_mask = rearrange(src_key_padding_mask, 'B T Seq1 -> (B T) Seq1')
         
         #Decoder only attends to context tokens and target mask tokens.
-        tgt = self.decoder(tgt, src_key_padding_mask = src_key_padding_mask)
+        if self.use_gradient_checkpointing and self.training:
+            tgt = checkpoint(self.decoder, tgt, src_key_padding_mask=src_key_padding_mask, use_reentrant=False)
+        else:
+            tgt = self.decoder(tgt, src_key_padding_mask = src_key_padding_mask)
         preds = self.decoder_to_encoder_mapper(tgt)
         return preds
 
@@ -460,11 +466,27 @@ class JEPA(pl.LightningModule):
     ) -> torch.Tensor:
 
         if self.use_gradient_checkpointing and self.training:
-            contextual_features = checkpoint(self.encoder, x_contexts, use_reentrant=False)
+            contextual_features = checkpoint(self.encoder, x_contexts, src_key_padding_mask=src_key_padding_mask, use_reentrant=False)
         else:
             contextual_features = self.encoder(x_contexts, src_key_padding_mask = src_key_padding_mask)
 
         return contextual_features
+
+    def encoder_top_k_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Differentiable counterpart of the teacher's complete-window readout.
+
+        Teacher targets use the outputs of encoder layers before encoder.norm.
+        Preserve that convention, including the upstream top-k=1 special case.
+        """
+        layer_outputs = []
+        for i, layer in enumerate(self.encoder.layers):
+            if self.use_gradient_checkpointing and self.training:
+                x = checkpoint(layer, x, use_reentrant=False)
+            else:
+                x = layer(x)
+            if len(self.encoder.layers) - i <= self.hparams.average_top_k_layers:
+                layer_outputs.append(x)
+        return self._make_targets(layer_outputs) if self.hparams.average_top_k_layers > 1 else layer_outputs[-1]
 
     @torch.inference_mode()
     def get_audio_representation(self, audio : torch.Tensor, padding_mask : torch.tensor):

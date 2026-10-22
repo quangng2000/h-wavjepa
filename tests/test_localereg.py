@@ -143,10 +143,7 @@ def test_invalid_populations_are_rejected(states):
         LocaLeReg()(states)
 
 
-def test_unvalidated_precision_and_distributed_execution_are_rejected(monkeypatch):
+def test_unsupported_precision_is_rejected():
     states = torch.randn(2, 4, 8)
     with pytest.raises(ValueError, match="float32"):
         LocaLeReg()(states.double())
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    with pytest.raises(RuntimeError, match="Distributed"):
-        LocaLeReg()(states)

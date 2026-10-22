@@ -10,3 +10,7 @@ pin_memory: false
 persistent_workers: false
 # Set a positive value only with num_workers > 0; null uses PyTorch's default.
 prefetch_factor: null
+# Crop one chronological excerpt per manifest segment, varying deterministically by epoch.
+train_random_crop: true
+train_drop_last: false
+seed: ${seed}

@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - audioset
+  - override /trainer: h100_ddp
+  - _self_
+
+tags: [audioset, pointwise-hierarchy, two-h100, localereg]
+num_threads: 4
+data:
+  # Actual global regularizer population = 32 recordings/rank * 2 GPUs = 64.
+  # Gradient accumulation changes the optimizer batch, not this population.
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+model:
+  backbone:
+    config:
+      use_gradient_checkpointing: true
+trainer:
+  max_epochs: -1
+  max_steps: 375000
+  log_every_n_steps: 50
+  # Periodic validation of the objective; HEAR is an independent evaluation.
+  check_val_every_n_epoch: null
+  val_check_interval: 5000
+test: false

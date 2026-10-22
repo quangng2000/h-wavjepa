@@ -11,13 +11,14 @@ reimplementation and not an endorsed upstream release.
 
 ## Third-party notice
 
-`pos_embed.py` retains Meta's copyright notice and explicitly cites
-https://github.com/facebookresearch/AudioMAE/blob/main/util/pos_embed.py.
-AudioMAE publishes an Attribution-NonCommercial 4.0 license, retained here as
-`LICENSE-AudioMAE` from https://github.com/facebookresearch/AudioMAE/blob/main/LICENSE.
-The exact provenance of every positional utility is not independently resolved;
-do not assume WavJEPA's root BSD license overrides those inherited restrictions
-or that this integrated bundle is cleared for commercial use.
+The previously copied AudioMAE positional utility has been removed from active
+code. `pos_embed.py` now implements only the mathematical 1D sinusoidal formula,
+independently, with the sine-then-cosine channel ordering required by WavJEPA.
+Float32 outputs are checked against golden hashes generated from the unmodified
+pinned upstream implementation. The original source hash and `LICENSE-AudioMAE`
+remain solely as historical provenance for earlier repository revisions. This
+change is not a statement about commercial rights to pretrained weights, other
+dependencies, or historical revisions containing the removed source.
 
 ## Integration boundary
 
@@ -57,6 +58,25 @@ explicit `model.` prefix. No Hub Python is executed. The downloadable artifact
 is SHA-256 checked against
 `988546976c453353c14ebb0798f275ea5eb95270d75eed506ea455c5b49f6be0`.
 
-Token readout exposes the original contextual encoder output before averaging.
+The original `encode_tokens` and legacy window readout retain the final encoder
+output. New dynamics configurations explicitly select `normalized_top_k`, which
+uses matching student and teacher layer-selection/normalization before averaging.
+Existing checkpoints default to the legacy readout. The masked branch exposes
+its already-computed detached teacher means for reuse by forecasting.
+
+Gradient checkpointing now preserves attention padding masks in the student
+encoder, covers the decoder, and checkpoints the new online top-k traversal.
+Target normalization and masked-loss reductions run in FP32 during mixed
+precision. The default FP32 masked objective remains numerically unchanged.
+The adapter continues to reject `compile_modules`.
+
+The official Hugging Face release can initialize a shorter-window model by
+regenerating only the two fixed sinusoidal positional tensors. Both source
+tensors must exactly match the original 200-token base grid; all learned tensors
+still require exact names, shapes and dtypes. The AudioSet preset uses 16160
+samples (1.01 seconds, 100 tokens), an explicit adaptation of the released
+2.01-second window, not an identical reproduction of its training recipe.
+
+Token readout exposes contextual encoder output before averaging.
 Its nominal centers follow the convolution strides and receptive fields; its
 context remains the entire completed window, not only that convolution support.

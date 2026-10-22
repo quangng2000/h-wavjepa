@@ -17,7 +17,9 @@ from typing import Any
 
 import lightning as L
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from lightning.pytorch.strategies import DDPStrategy, SingleDeviceStrategy
 from torch import Tensor, nn
 from transformers import get_cosine_schedule_with_warmup
 
@@ -56,6 +58,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "localereg_min_cluster_size": 4,
         "localereg_kmeans_iters": 10,
         "localereg_n_quad": 256,
+        "readout_mode": "legacy",
     }
 
     def __init__(
@@ -85,8 +88,12 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         localereg_min_cluster_size: int = 4,
         localereg_kmeans_iters: int = 10,
         localereg_n_quad: int = 256,
+        readout_mode: str = "legacy",
     ) -> None:
         super().__init__()
+        if readout_mode not in {"legacy", "normalized_top_k"}:
+            raise ValueError("readout_mode must be legacy or normalized_top_k")
+        self.readout_mode = readout_mode
         if regularizer_kind not in {"sigreg", "localereg"}:
             raise ValueError("regularizer_kind must be sigreg or localereg")
         for name, value, minimum in (
@@ -214,6 +221,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "localereg_min_cluster_size": localereg_min_cluster_size,
             "localereg_kmeans_iters": localereg_kmeans_iters,
             "localereg_n_quad": localereg_n_quad,
+            "readout_mode": readout_mode,
             "lr_schedule": lr_schedule,
             "lr_warmup_steps": lr_warmup_steps,
             "lr_total_steps": lr_total_steps,
@@ -223,8 +231,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         self.save_hyperparameters(deepcopy(self.config))
 
     def setup(self, stage: str) -> None:
-        if self.trainer.world_size != 1 or str(self.trainer.precision) not in {"32", "32-true"}:
-            raise ValueError("Upstream dynamics integration currently supports single-device FP32")
+        if str(self.trainer.precision) not in {"32", "32-true", "bf16-mixed"}:
+            raise ValueError("Upstream dynamics supports FP32 or bf16-mixed precision")
+        if not isinstance(self.trainer.strategy, (SingleDeviceStrategy, DDPStrategy)):
+            raise ValueError("Upstream dynamics supports single-device or DDP execution")
         if self.trainer.strategy.root_device.type not in {"cpu", "cuda"}:
             raise ValueError("Upstream dynamics integration currently supports CPU/CUDA only")
 
@@ -285,7 +295,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         level l has floor((window_count - 1) / state_strides[l]) + 1 states.
         """
         return self._levels(
-            self.backbone.encode_windows(self._windows(waveform)),
+            self.backbone.encode_windows(self._windows(waveform), readout_mode=self.readout_mode),
             self.abstractions,
             self.state_strides if subsample else (1, 1, 1),
         )
@@ -323,7 +333,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         if seed is not None and (type(seed) is not int or not 0 <= seed < 2**32):
             raise ValueError("seed must be an integer in [0,2**32)")
         zero = waveform.new_zeros(())
-        masked = self.backbone.masked_loss(windows, seed=seed) if self.masked_weight else zero
+        teacher_windows = None
+        if self.masked_weight:
+            masked, teacher_windows = self.backbone.masked_loss_with_targets(windows, seed=seed)
+        else:
+            masked = zero
         terms, reg_terms = [zero] * 3, [zero] * 3
         levels, predictions, targets = [], [], []
         regularization_stats = []
@@ -333,17 +347,25 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             prefix = waveform[:, : self.context_windows * self.window_samples]
             levels = self.encode(prefix, subsample=True)
             predictions = self._predict_levels(levels)
-            target_levels = self.encode_targets(waveform)
-            targets = [
-                values[:, self.context_windows - 1 + horizon]
-                for values, horizon in zip(target_levels, self.horizons, strict=True)
-            ]
-            terms = [
-                F.mse_loss(prediction, target) if weight > 0 else zero
-                for prediction, target, weight in zip(
-                    predictions, targets, self.prediction_weights, strict=True
-                )
-            ]
+            if any(self.prediction_weights):
+                indices = [self.context_windows - 1 + horizon for horizon in self.horizons]
+                with torch.no_grad():
+                    # The masked anchor already evaluated the dense teacher. Reuse
+                    # only detached targets; no future activations enter the student.
+                    # Without the anchor, evaluate only the three requested windows.
+                    selected = (
+                        teacher_windows[:, indices]
+                        if teacher_windows is not None
+                        else self.backbone.encode_teacher_windows(windows[:, indices])
+                    )
+                    target_levels = self._levels(selected, self.teacher_abstractions)
+                    targets = [values[:, i] for i, values in enumerate(target_levels)]
+                terms = [
+                    F.mse_loss(prediction.float(), target.float()) if weight > 0 else zero
+                    for prediction, target, weight in zip(
+                        predictions, targets, self.prediction_weights, strict=True
+                    )
+                ]
             if self.regularization_weight:
                 # fork_rng makes evaluation repeatable without consuming global
                 # RNG. CPU evaluation is the reference; accelerator RNG is seeded
@@ -358,8 +380,26 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                         for device in devices:
                             torch.cuda.default_generators[device].manual_seed(seed)
                     reg_terms = []
-                    for level in levels:
-                        reg_terms.append(self.regularizer(level.transpose(0, 1)))
+                    distributed = dist.is_available() and dist.is_initialized()
+                    for index, level in enumerate(levels):
+                        # The same random statistic must be evaluated on every
+                        # rank's differentiably gathered population. Accumulation
+                        # does not enlarge that population. Single-device legacy
+                        # runs retain their original seeded RNG sequence.
+                        regularizer_seed = (
+                            (self.eval_seed + 3 * self.global_step + index) % 2**32
+                            if distributed and self.training and seed is None
+                            else (seed + index) % 2**32
+                            if distributed and seed is not None
+                            else None
+                        )
+                        reg_terms.append(
+                            self.regularizer(
+                                level.transpose(0, 1),
+                                global_batch=self.training and torch.is_grad_enabled(),
+                                seed=regularizer_seed,
+                            )
+                        )
                         regularization_stats.append(
                             dict(getattr(self.regularizer, "last_stats", {}))
                         )
@@ -391,7 +431,12 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     def _shared_step(self, batch: dict[str, Tensor], stage: str, batch_idx: int) -> Tensor:
         seed = None if stage == "train" else (self.eval_seed + batch_idx) % 2**32
         result = self.compute_loss(batch["waveform"], seed=seed)
-        kwargs = dict(on_step=stage == "train", on_epoch=True, batch_size=len(batch["waveform"]))
+        kwargs = dict(
+            on_step=stage == "train",
+            on_epoch=True,
+            batch_size=len(batch["waveform"]),
+            sync_dist=True,
+        )
         for key in ("loss", "masked_loss", "prediction_loss", "regularization_loss"):
             self.log(f"{stage}/{key}", result[key], prog_bar=key == "loss", **kwargs)
         for i, (term, penalty) in enumerate(

@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - audioset
+  - _self_
+
+# Match windows, strides, targets, initialization, regularizer and step budget.
+tags: [audioset, flat-multi-horizon-control, localereg]
+model:
+  hierarchy: false
+

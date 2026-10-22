@@ -1,0 +1,31 @@
+# @package _global_
+defaults:
+  - upstream_hierarchical
+  - _self_
+
+tags: [audioset, pointwise-hierarchy, random-initialization, localereg]
+data:
+  # 9 non-overlapping 1.01 s windows fit a real 10 s AudioSet recording.
+  # A random chronological excerpt is chosen each training epoch.
+  num_samples: 145440
+  train_random_crop: true
+  train_drop_last: true
+model:
+  backbone:
+    config:
+      window_samples: 16160
+  optimizer:
+    lr: 0.0002
+  lr_total_steps: 375000
+  lr_warmup_steps: 100000
+  ema_anneal_end_step: 100000
+trainer:
+  max_epochs: -1
+  max_steps: 375000
+callbacks:
+  # Comparisons use a fixed optimizer-step budget rather than early stopping.
+  early_stopping: null
+  model_checkpoint:
+    filename: "step_{step:07d}"
+    save_on_train_epoch_end: false
+

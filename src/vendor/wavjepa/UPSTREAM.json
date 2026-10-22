@@ -20,10 +20,14 @@
     "Trailing source newlines normalized.",
     "TimeInverseBlockMasker and compute_mask_indices accept an optional local NumPy Generator; masker retries capped at 1000 by default.",
     "Original EMA teacher explicitly remains in eval mode after initialization and train() calls.",
-    "JEPA accepts an optional positive integer target_length so 32160 samples are preserved exactly rather than truncated through floating-point seconds; default upstream timing is unchanged."
+    "JEPA accepts an optional positive integer target_length so 32160 samples are preserved exactly rather than truncated through floating-point seconds; default upstream timing is unchanged.",
+    "Inherited AudioMAE positional-utility source removed from active package and replaced by an independent 1D sinusoidal formula implementation; original source hash and historical license retained for provenance. Float32 golden outputs match the pinned original source.",
+    "Gradient checkpointing preserves encoder padding masks and also covers decoder and differentiable top-k student readout; torch.compile remains unsupported by the adapter.",
+    "Target normalization and masked-loss arithmetic use FP32 under autocast; default FP32 equations unchanged.",
+    "Added differentiable student top-k readout matching teacher layer selection, normalization, and omission of final encoder LayerNorm; original masked branch is unchanged."
   ],
-  "scope": "Core JEPA, convolutional feature extractor, masking, initialization and positional utilities; no evaluation vendors or data_modules.",
+  "scope": "Core JEPA, convolutional feature extractor, masking and initialization; independently implemented positional formula; no evaluation vendors or data_modules.",
   "third_party_licenses": {
-    "pos_embed": "Retains Meta copyright and AudioMAE provenance; LICENSE-AudioMAE is CC-BY-NC-4.0. Exact provenance unresolved; commercial clearance not claimed."
+    "pos_embed": "Active positional implementation is independent and contains none of the inherited AudioMAE utilities. Original source hash and LICENSE-AudioMAE retained solely as historical provenance; no broader commercial-rights claim for pretrained weights or dependencies."
   }
 }

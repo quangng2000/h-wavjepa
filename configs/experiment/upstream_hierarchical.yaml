@@ -18,6 +18,5 @@ data:
   num_workers: 0
 trainer:
   max_epochs: 100
-  devices: 1
-  precision: 32-true
+  use_distributed_sampler: false
   log_every_n_steps: 10

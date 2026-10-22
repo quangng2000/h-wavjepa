@@ -19,6 +19,7 @@ from src.pretrained import download_official_weights, file_sha256
 from src.vendor.wavjepa.extractors import ConvFeatureExtractor
 from src.vendor.wavjepa.jepa import JEPA
 from src.vendor.wavjepa.masking import TimeInverseBlockMasker
+from src.vendor.wavjepa.pos_embed import get_1d_sincos_pos_embed_from_grid
 from src.vendor.wavjepa.types import TransformerEncoderCFG, TransformerLayerCFG
 
 UPSTREAM_COMMIT = "6f4e1b1f18316c50768c8523f325ccffeaa6985b"
@@ -90,7 +91,9 @@ class WavJEPABackbone(nn.Module):
         # The official base release has a fixed architecture and 200 positions.
         # Reject incompatible presets before any network request or allocation.
         if pretrained and any(
-            cfg[key] != DEFAULT_CONFIG[key] for key in DEFAULT_CONFIG if key != "masker"
+            cfg[key] != DEFAULT_CONFIG[key]
+            for key in DEFAULT_CONFIG
+            if key not in {"masker", "window_samples", "use_gradient_checkpointing"}
         ):
             raise ValueError("official pretrained base requires the default backbone architecture")
         extractor = ConvFeatureExtractor(
@@ -118,7 +121,7 @@ class WavJEPABackbone(nn.Module):
             target_length=self.window_samples,
             nr_samples_per_audio=1,
             compile_modules=False,
-            use_gradient_checkpointing=False,
+            use_gradient_checkpointing=cfg["use_gradient_checkpointing"],
         )
         self.masker = TimeInverseBlockMasker(**cfg["masker"])
         if checkpoint_path is not None:
@@ -156,8 +159,10 @@ class WavJEPABackbone(nn.Module):
                 raise ValueError(f"{prefix}_dim must be even and divisible by its head count")
         if not 1 <= cfg["average_top_k_layers"] <= cfg["encoder_layers"]:
             raise ValueError("average_top_k_layers must fit the encoder depth")
-        if cfg["compile_modules"] is not False or cfg["use_gradient_checkpointing"] is not False:
-            raise ValueError("compile_modules and use_gradient_checkpointing are unsupported")
+        if cfg["compile_modules"] is not False:
+            raise ValueError("compile_modules is unsupported")
+        if type(cfg["use_gradient_checkpointing"]) is not bool:
+            raise ValueError("use_gradient_checkpointing must be boolean")
         if not math.isfinite(cfg["mlp_ratio"]) or cfg["mlp_ratio"] < 1:
             raise ValueError("mlp_ratio must be finite and at least one")
         patches = cfg["window_samples"]
@@ -214,13 +219,20 @@ class WavJEPABackbone(nn.Module):
                 return self._encode_tokens(waveforms, teacher=True)
         return self._encode_tokens(waveforms, teacher=False)
 
-    def _encode_tokens(self, waveforms: Tensor, teacher: bool) -> Tensor:
+    def _encode_tokens(
+        self, waveforms: Tensor, teacher: bool, readout_mode: str = "legacy"
+    ) -> Tensor:
         x = self._normalized_windows(waveforms)
         x = self.model.feature_norms(self.model.extract_audio(x))
         if self.model.post_extraction_mapper is not None:
             x = self.model.post_extraction_mapper(x)
         x = x + self.model.pos_encoding_encoder
-        x = self.model._forward_teacher(x.detach()) if teacher else self.model.encoder_forward(x)
+        if teacher:
+            x = self.model._forward_teacher(x.detach())
+        elif readout_mode == "normalized_top_k":
+            x = self.model.encoder_top_k_forward(x)
+        else:
+            x = self.model.encoder_forward(x)
         return x.reshape(
             waveforms.shape[0], waveforms.shape[1], self.model.total_patches, self.embedding_dim
         )
@@ -233,12 +245,35 @@ class WavJEPABackbone(nn.Module):
         )
         return samples * (1000.0 / self.sample_rate)
 
-    def encode_windows(self, waveforms: Tensor) -> Tensor:
-        """Encode each completed window, retaining gradients to the official encoder."""
-        return self.encode_tokens(waveforms).mean(dim=2)
+    def encode_windows(self, waveforms: Tensor, readout_mode: str = "legacy") -> Tensor:
+        """Read completed windows with gradients, using an explicit saved convention.
+
+        ``legacy`` preserves the final-layer readout of existing checkpoints.
+        ``normalized_top_k`` applies the teacher's exact layer-selection and
+        normalization rule to student layers, before the same temporal mean.
+        The latter aligns the distributions presented to online and EMA upper
+        maps; it does not alter the original masked prediction objective.
+        """
+        if readout_mode not in {"legacy", "normalized_top_k"}:
+            raise ValueError("readout_mode must be legacy or normalized_top_k")
+        return (
+            self._encode_tokens(waveforms, teacher=False, readout_mode=readout_mode)
+            .float()
+            .mean(dim=2)
+        )
 
     def masked_loss(self, waveforms: Tensor, seed: int | None = None) -> Tensor:
         """Original upstream masked objective, evaluated independently per window."""
+        return self.masked_loss_with_targets(waveforms, seed=seed)[0]
+
+    def masked_loss_with_targets(
+        self, waveforms: Tensor, seed: int | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """Return masked loss and detached [B,T,D] teacher means from one forward.
+
+        Reusing these targets avoids repeating the complete teacher encoder for
+        the forecasting objective. The mask affects only student/decoder paths.
+        """
         if seed is not None and (type(seed) is not int or not 0 <= seed < 2**63):
             raise ValueError("seed must be an integer in [0,2**63) or None")
         if seed is None:
@@ -255,7 +290,10 @@ class WavJEPABackbone(nn.Module):
         masks = tuple(mask.to(audio.device) for mask in masks)
         if not masks[1].any() or not (~masks[0]).any(dim=1).all():
             raise RuntimeError("upstream masker produced an empty target or context")
-        return self.model(audio, *masks)["loss"]
+        output = self.model(audio, *masks)
+        targets = output["targets"].detach().float().mean(dim=1)
+        targets = targets.reshape(waveforms.shape[0], waveforms.shape[1], self.embedding_dim)
+        return output["loss"], targets
 
     @torch.no_grad()
     def encode_teacher_windows(self, waveforms: Tensor) -> Tensor:
@@ -264,7 +302,7 @@ class WavJEPABackbone(nn.Module):
         As in WavJEPA, only the context Transformer is EMA: frontend, feature norm
         and mapper are shared with the student and detached on this target path.
         """
-        return self.encode_tokens(waveforms, teacher=True).mean(dim=2)
+        return self.encode_tokens(waveforms, teacher=True).float().mean(dim=2)
 
     @torch.no_grad()
     def update_masked_teacher(self, decay: float) -> None:
@@ -305,8 +343,9 @@ class WavJEPABackbone(nn.Module):
     def load_huggingface_checkpoint(self, path: str | Path) -> None:
         """Load the explicit official HF export layout: tensor keys prefixed model.
 
-        No arbitrary prefix guessing, positional resizing, missing-key fallback
-        or remote Python execution is allowed. Local files may be used offline;
+        Only fixed sinusoidal positions may be regenerated when adapting the
+        official 200-token base release to another completed-window length.
+        No learned-tensor resizing, missing-key fallback or remote Python is allowed. Local files may be used offline;
         only download_official_weights also verifies the published file digest.
         """
         from safetensors.torch import load_file
@@ -318,8 +357,46 @@ class WavJEPABackbone(nn.Module):
         normalized = {key.removeprefix("model."): value for key, value in state.items()}
         if len(normalized) != len(state):
             raise ValueError("Hugging Face checkpoint keys collide after normalization")
+        normalized = self._adapt_fixed_positions(normalized)
         self._load_checked_state(normalized)
         self.checkpoint_sha256 = file_sha256(source)
+
+    def _adapt_fixed_positions(self, state: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Adapt only validated, nonlearned base-release sinusoidal positions."""
+        expected = self.model.state_dict()
+        position_keys = ("pos_encoding_encoder", "pos_encoding_decoder")
+        if not any(
+            key in state and state[key].shape != expected[key].shape for key in position_keys
+        ):
+            return state
+        if any(
+            self.config[key] != DEFAULT_CONFIG[key]
+            for key in DEFAULT_CONFIG
+            if key not in {"masker", "window_samples", "use_gradient_checkpointing"}
+        ):
+            raise ValueError(
+                "positional adaptation requires the official base learned architecture"
+            )
+        adapted = dict(state)
+        for key, width in zip(position_keys, (768, 384), strict=True):
+            original = state.get(key)
+            canonical = (
+                torch.from_numpy(
+                    get_1d_sincos_pos_embed_from_grid(width, np.arange(200, dtype=np.float64))
+                )
+                .float()
+                .unsqueeze(0)
+            )
+            if (
+                original is None
+                or original.dtype != torch.float32
+                or not torch.equal(original, canonical)
+            ):
+                raise ValueError(
+                    "positional adaptation requires exact official 200-token sinusoidal tensors"
+                )
+            adapted[key] = expected[key].clone()
+        return adapted
 
     def _load_checked_state(self, state: Mapping[str, Tensor]) -> None:
         """Validate every tensor before mutating any model parameter."""

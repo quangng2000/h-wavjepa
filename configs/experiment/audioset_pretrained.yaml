@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - audioset
+  - _self_
+
+tags: [audioset, pointwise-hierarchy, pretrained-initialization, localereg]
+model:
+  backbone:
+    pretrained: true
+

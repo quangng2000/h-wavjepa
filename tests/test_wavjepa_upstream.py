@@ -1,5 +1,6 @@
 """Integration checks use actual pinned upstream modules, never fake backbones."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import torch
 from src.models.components.wavjepa_backbone import UPSTREAM_COMMIT, WavJEPABackbone
 from src.vendor.wavjepa.jepa import JEPA
 from src.vendor.wavjepa.masking import TimeInverseBlockMasker
+from src.vendor.wavjepa.pos_embed import get_1d_sincos_pos_embed_from_grid
 
 
 @pytest.fixture
@@ -140,7 +142,7 @@ def test_checkpoint_missing_keys_does_not_partially_mutate(tiny_config, tmp_path
         torch.testing.assert_close(value, backbone.model.state_dict()[key], atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("field", ["compile_modules", "use_gradient_checkpointing"])
+@pytest.mark.parametrize("field", ["compile_modules"])
 def test_unsupported_execution_modes_fail_closed(tiny_config, field):
     tiny_config[field] = True
     with pytest.raises(ValueError, match="unsupported"):
@@ -271,3 +273,140 @@ def test_pretrained_configuration_rejected_before_network(tiny_config, monkeypat
         WavJEPABackbone(tiny_config, pretrained=True)
     with pytest.raises(ValueError, match="choose only one"):
         WavJEPABackbone(tiny_config, pretrained=True, checkpoint_path="anything.ckpt")
+
+
+@pytest.mark.parametrize("top_k", [1, 2, 3])
+def test_matching_student_teacher_multilayer_readouts(tiny_config, top_k):
+    # More than one layer is essential: one-layer fixtures miss this mismatch.
+    tiny_config.update(encoder_layers=3, average_top_k_layers=top_k)
+    backbone = WavJEPABackbone(tiny_config).train()
+    wave = torch.randn(2, 3, 512, requires_grad=True)
+    student = backbone.encode_windows(wave, readout_mode="normalized_top_k")
+    teacher = backbone.encode_teacher_windows(wave)
+    # Train/eval Transformer kernels can differ at float32 rounding scale.
+    torch.testing.assert_close(student, teacher, atol=2e-7, rtol=1e-6)
+    assert student.requires_grad and not teacher.requires_grad
+    student[..., 0].square().sum().backward()
+    assert wave.grad is not None and wave.grad.abs().sum() > 0
+    for layer in backbone.model.encoder.layers:
+        assert layer.self_attn.in_proj_weight.grad.abs().sum() > 0
+    assert all(p.grad is None for p in backbone.model.teacher_encoder.parameters())
+    if top_k > 1:
+        assert not torch.allclose(student, backbone.encode_windows(wave, readout_mode="legacy"))
+
+
+def test_reused_teacher_targets_are_exact_and_computed_once(tiny_config, monkeypatch):
+    tiny_config.update(encoder_layers=3, average_top_k_layers=2)
+    backbone = WavJEPABackbone(tiny_config).train()
+    wave = torch.randn(2, 3, 512)
+    expected = backbone.encode_teacher_windows(wave)
+    calls = []
+    original = backbone.model._forward_teacher
+
+    def track_teacher(x):
+        calls.append(x.shape[0])
+        return original(x)
+
+    monkeypatch.setattr(backbone.model, "_forward_teacher", track_teacher)
+    loss, reused = backbone.masked_loss_with_targets(wave, seed=19)
+    assert calls == [6]
+    assert not reused.requires_grad
+    torch.testing.assert_close(reused, expected, atol=0, rtol=0)
+    loss.backward()
+    assert backbone.model.encoder.layers[0].self_attn.in_proj_weight.grad is not None
+
+
+def test_checkpointing_preserves_masks_outputs_and_parameter_gradients(tiny_config):
+    tiny_config.update(encoder_layers=3, average_top_k_layers=2)
+    ordinary = WavJEPABackbone(tiny_config).train()
+    checkpointed = WavJEPABackbone({**tiny_config, "use_gradient_checkpointing": True}).train()
+    checkpointed.load_state_dict(ordinary.state_dict())
+    wave = torch.randn(2, 3, 512)
+    losses = []
+    for backbone in (ordinary, checkpointed):
+        masked, targets = backbone.masked_loss_with_targets(wave, seed=31)
+        online = backbone.encode_windows(wave, readout_mode="normalized_top_k")
+        loss = masked + (online - targets).square().mean() + online[..., 0].square().mean()
+        losses.append(loss)
+        loss.backward()
+    torch.testing.assert_close(losses[0], losses[1], atol=0, rtol=0)
+    for (name, left), (other, right) in zip(
+        ordinary.named_parameters(), checkpointed.named_parameters(), strict=True
+    ):
+        assert name == other
+        if left.grad is None or right.grad is None:
+            assert left.grad is None and right.grad is None, name
+        else:
+            torch.testing.assert_close(left.grad, right.grad, atol=0, rtol=0, msg=name)
+
+
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_bfloat16_autocast_keeps_normalization_and_loss_float32(tiny_config, checkpointing):
+    tiny_config.update(
+        encoder_layers=3, average_top_k_layers=2, use_gradient_checkpointing=checkpointing
+    )
+    backbone = WavJEPABackbone(tiny_config).train()
+    wave = torch.randn(2, 3, 512)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        loss, targets = backbone.masked_loss_with_targets(wave, seed=31)
+        online = backbone.encode_windows(wave, readout_mode="normalized_top_k")
+        loss = loss + online[..., 0].square().mean()
+    assert loss.dtype == targets.dtype == online.dtype == torch.float32
+    assert torch.isfinite(loss)
+    loss.backward()
+    grads = [p.grad for p in backbone.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(grad).all() for grad in grads)
+
+
+@pytest.mark.parametrize(
+    ("width", "length", "digest"),
+    [
+        (768, 200, "cc3f12feab365f34202328040784b4a2db7fc9764b5b082cab2ac513885cedaa"),
+        (384, 200, "89f483ecdfec2cba420c4bfa1baa35b857e1f3d27fa060235cc8dab2e9bd0410"),
+        (16, 127, "320a5b0d65c9855333695fe78270c3c9e78d30fb08a3e4b6b1fd59472e827cbd"),
+    ],
+)
+def test_independent_sinusoid_matches_original_source_float32_golden(width, length, digest):
+    # Generated by unmodified wavjepa/pos_embed.py at UPSTREAM_COMMIT, whose
+    # source SHA-256 is pinned in UPSTREAM.json; no integration helper was used.
+    positions = get_1d_sincos_pos_embed_from_grid(width, np.arange(length, dtype=np.float64))
+    assert hashlib.sha256(positions.astype("<f4").tobytes()).hexdigest() == digest
+
+
+def test_official_position_adaptation_changes_no_learned_tensor():
+    # A meta model checks the production layout without allocating a full model.
+    with torch.device("meta"):
+        backbone = WavJEPABackbone({"window_samples": 16160, "use_gradient_checkpointing": True})
+    state = dict(backbone.model.state_dict())
+    for key, width in (("pos_encoding_encoder", 768), ("pos_encoding_decoder", 384)):
+        state[key] = (
+            torch.from_numpy(get_1d_sincos_pos_embed_from_grid(width, np.arange(200)))
+            .float()
+            .unsqueeze(0)
+        )
+    adapted = backbone._adapt_fixed_positions(state)
+    assert backbone.model.total_patches == 100
+    for key in state:
+        if key.startswith("pos_encoding_"):
+            assert adapted[key].shape[1] == 100
+        else:
+            assert adapted[key] is state[key]
+    corrupted = dict(state)
+    corrupted["pos_encoding_encoder"] = state["pos_encoding_encoder"].clone()
+    corrupted["pos_encoding_encoder"][0, 0, 0] = 2.0
+    with pytest.raises(ValueError, match="exact official"):
+        backbone._adapt_fixed_positions(corrupted)
+
+
+def test_official_pretrained_accepts_window_and_checkpointing_flags_before_download(monkeypatch):
+    # Stop at download after checking the real base architecture on meta.
+    def downloaded(**kwargs):
+        raise RuntimeError("download reached")
+
+    monkeypatch.setattr(
+        "src.models.components.wavjepa_backbone.download_official_weights", downloaded
+    )
+    with torch.device("meta"), pytest.raises(RuntimeError, match="download reached"):
+        WavJEPABackbone(
+            {"window_samples": 16160, "use_gradient_checkpointing": True}, pretrained=True
+        )

@@ -111,7 +111,7 @@ def validate_config(cfg: DictConfig) -> None:
 
 
 def _validate_upstream_forecasting(cfg: DictConfig) -> None:
-    """Bound the initial upstream-backed route to audited input/runtime modes."""
+    """Validate the waveform contract and supported Lightning execution modes."""
     backbone = cfg.model.backbone.config
     values = {
         "data.num_samples": cfg.data.num_samples,
@@ -163,18 +163,43 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
             "upstream forecasting supports explicit cpu/cuda/gpu accelerators only; "
             "MPS seeded RNG isolation is not yet validated"
         )
-    if cfg.trainer.get("precision", "32-true") not in (32, "32", "32-true"):
-        raise ValueError("upstream forecasting currently supports only full FP32 precision")
+    if cfg.trainer.get("precision", "32-true") not in (32, "32", "32-true", "bf16-mixed"):
+        raise ValueError("upstream forecasting supports FP32 or bf16-mixed precision")
     devices = cfg.trainer.get("devices", 1)
-    single_device = type(devices) is int and devices == 1
+    device_count = devices if type(devices) is int and devices > 0 else 0
     if isinstance(devices, (list, tuple)) or OmegaConf.is_list(devices):
-        single_device = len(devices) == 1
+        device_count = len(devices)
+        if any(type(index) is not int or index < 0 for index in devices):
+            device_count = 0
+        if len(set(devices)) != len(devices):
+            device_count = 0
+    nodes = cfg.trainer.get("num_nodes", 1)
+    if not device_count or type(nodes) is not int or nodes < 1:
+        raise ValueError("upstream forecasting requires explicit positive devices and num_nodes")
+    strategy = cfg.trainer.get("strategy", "auto")
+    if isinstance(strategy, DictConfig):
+        supported = strategy.get("_target_", "") in {
+            "lightning.pytorch.strategies.DDPStrategy",
+            "lightning.pytorch.strategies.ddp.DDPStrategy",
+        }
+    else:
+        supported = strategy in {
+            "auto",
+            "ddp",
+            "ddp_find_unused_parameters_true",
+            "ddp_find_unused_parameters_false",
+        }
+    if not supported:
+        raise ValueError("upstream forecasting supports single-device or DDP strategies only")
     if (
-        not single_device
-        or cfg.trainer.get("num_nodes", 1) != 1
-        or cfg.trainer.get("strategy", "auto") != "auto"
+        device_count * nodes > 1
+        and cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
+        and cfg.trainer.get("use_distributed_sampler", True)
     ):
-        raise ValueError("upstream forecasting currently supports one device with strategy=auto")
+        raise ValueError(
+            "WAV DDP requires trainer.use_distributed_sampler=false; "
+            "the datamodule owns rank sharding and minimum batch sizes"
+        )
 
 
 def _now() -> str:

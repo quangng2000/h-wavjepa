@@ -46,6 +46,9 @@ context_windows: 5
 horizons: [1, 2, 4]
 state_strides: [1, 2, 4]
 hierarchy: true
+# Matching top-k transformations on online/EMA inputs to the upper maps.
+# Old checkpoints without this field retain their original legacy readout.
+readout_mode: normalized_top_k
 hidden_dim: 256
 predictor_layers: 2
 predictor_heads: 4

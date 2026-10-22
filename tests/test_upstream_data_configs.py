@@ -7,7 +7,12 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from src.data.wav_datamodule import WAVManifestDataModule, WAVManifestDataset, _MinimumBatchSampler
+from src.data.wav_datamodule import (
+    WAVManifestDataModule,
+    WAVManifestDataset,
+    _EpochDistributedSampler,
+    _MinimumBatchSampler,
+)
 from src.utils.runtime import validate_config
 
 
@@ -123,11 +128,11 @@ def test_real_loader_merges_singleton_train_validation_and_test(tmp_path):
         loader = getattr(module, f"{stage}_dataloader")()
         batch_sampler = loader.batch_sampler
         assert isinstance(batch_sampler, _MinimumBatchSampler)
-        assert isinstance(
-            batch_sampler.sampler, RandomSampler if stage == "train" else SequentialSampler
-        )
+        assert isinstance(batch_sampler.sampler, _EpochDistributedSampler)
+        assert batch_sampler.sampler.shuffle == (stage == "train")
         batches = list(batch_sampler)
-        assert sorted(index for batch in batches for index in batch) == list(range(5))
+        assert sorted(index for batch in batches for index, epoch in batch) == list(range(5))
+        assert all(epoch == 0 for batch in batches for index, epoch in batch)
         assert [batch["waveform"].shape[0] for batch in loader] == [2, 3]
 
 
@@ -182,6 +187,44 @@ def test_upstream_real_presets_are_explicit_and_chronological(
     assert OmegaConf.is_missing(cfg.data, "test_manifest")
 
 
+@pytest.mark.parametrize(
+    "experiment",
+    [
+        "audioset",
+        "audioset_pretrained",
+        "audioset_flat",
+        "audioset_h100",
+    ],
+)
+def test_audioset_presets_fit_real_ten_second_clips(make_config, experiment):
+    cfg = make_config([f"experiment={experiment}"])
+    validate_config(cfg)
+    assert cfg.model.backbone.config.window_samples == 16160
+    assert cfg.data.num_samples == 16160 * (5 + 4) == 145440
+    assert cfg.data.num_samples / cfg.data.sample_rate == 9.09
+    assert cfg.data.require_full_length
+    assert cfg.data.train_random_crop and cfg.data.train_drop_last
+    assert cfg.model.hierarchy == (experiment != "audioset_flat")
+    assert cfg.model.backbone.pretrained == (experiment == "audioset_pretrained")
+    assert cfg.model.lr_total_steps == cfg.trainer.max_steps == 375000
+    assert cfg.model.lr_warmup_steps == cfg.model.ema_anneal_end_step == 100000
+    assert cfg.model.readout_mode == "normalized_top_k"
+    assert cfg.callbacks.early_stopping is None
+    assert cfg.callbacks.model_checkpoint.filename == "step_{step:07d}"
+    assert cfg.callbacks.model_checkpoint.save_on_train_epoch_end is False
+    if experiment == "audioset_h100":
+        assert cfg.trainer.devices == 2
+        assert cfg.trainer.accelerator == "gpu"
+        assert cfg.trainer.precision == "bf16-mixed"
+        assert not cfg.trainer.use_distributed_sampler
+        assert not cfg.trainer.deterministic
+        assert cfg.model.backbone.config.use_gradient_checkpointing
+        assert cfg.data.batch_size * cfg.trainer.devices == 64
+    else:
+        assert cfg.trainer.devices == 1
+        assert cfg.trainer.precision == "32-true"
+
+
 @pytest.mark.parametrize("name", ["train", "eval"])
 def test_upstream_smoke_composes_without_downloads(make_config, name):
     cfg = make_config(["experiment=upstream_smoke"], name=name)
@@ -207,14 +250,14 @@ def test_upstream_smoke_composes_without_downloads(make_config, name):
         ("model.horizons=[1,2,0]", "horizons must contain positive integers"),
         ("model.state_strides=[2,2,4]", "state_strides must start at 1"),
         ("model.state_strides=[1,4,2]", "state_strides must start at 1"),
-        ("trainer.precision=16-mixed", "only full FP32"),
+        ("trainer.precision=16-mixed", "FP32 or bf16-mixed"),
         ("trainer.accelerator=mps", "MPS seeded RNG isolation"),
         ("trainer.accelerator=auto", "explicit cpu/cuda/gpu"),
         ("data.batch_size=1", "regularization requires data.batch_size >= 2"),
-        ("trainer.devices=2", "one device"),
-        ("trainer.devices=auto", "one device"),
-        ("+trainer.num_nodes=2", "one device"),
-        ("+trainer.strategy=ddp", "one device"),
+        ("trainer.devices=auto", "explicit positive devices"),
+        ("trainer.devices=[0,0]", "explicit positive devices"),
+        ("+trainer.num_nodes=0", "explicit positive devices"),
+        ("+trainer.strategy=fsdp", "DDP strategies only"),
     ],
 )
 def test_upstream_preflight_rejects_unsupported_input_and_runtime(make_config, override, message):
@@ -244,6 +287,33 @@ def test_no_regularization_allows_batch_size_one(make_config):
 
 def test_explicit_single_device_list_is_supported(make_config):
     cfg = make_config(["experiment=upstream_smoke", "trainer.devices=[0]"])
+    validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["trainer.devices=2", "+trainer.strategy=ddp"],
+        ["trainer.devices=[0,1]", "trainer.accelerator=gpu", "trainer.precision=bf16-mixed"],
+        ["+trainer.num_nodes=2", "+trainer.strategy=ddp"],
+    ],
+)
+def test_explicit_distributed_and_mixed_precision_configs_are_supported(make_config, overrides):
+    cfg = make_config(["experiment=upstream_smoke", *overrides])
+    validate_config(cfg)
+
+
+def test_wav_distributed_config_requires_datamodule_sampler(make_config):
+    cfg = make_config(
+        [
+            "experiment=upstream_hierarchical",
+            "trainer.devices=2",
+            "++trainer.use_distributed_sampler=true",
+        ]
+    )
+    with pytest.raises(ValueError, match="use_distributed_sampler=false"):
+        validate_config(cfg)
+    cfg.trainer.use_distributed_sampler = False
     validate_config(cfg)
 
 

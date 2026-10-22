@@ -9,6 +9,7 @@ from functools import partial
 import torch
 from torch import nn
 
+from src.objectives.distributed import prepare_population, regularizer_rng
 from src.vendor.localereg.losses import ballreg_loss, local_ballreg_loss
 
 SOURCE_COMMIT = "771361c18d37e65df3dc188761ffb26751ce4e37"
@@ -39,20 +40,25 @@ class LocaLeReg(nn.Module):
         self.kmeans_iters = kmeans_iters
         self.n_quad = n_quad
         self.last_stats: dict[str, float] = {}
+        self._distributed_rng = torch.Generator().manual_seed(torch.initial_seed())
 
-    def forward(self, states: torch.Tensor) -> torch.Tensor:
-        if (
-            states.ndim != 3
-            or states.size(0) < 1
-            or states.size(1) < 2
-            or states.size(2) < 1
-            or not torch.isfinite(states).all()
+    def forward(
+        self, states: torch.Tensor, *, global_batch: bool | None = None, seed: int | None = None
+    ) -> torch.Tensor:
+        if global_batch is None:
+            global_batch = self.training and torch.is_grad_enabled()
+        states, distributed = prepare_population(
+            states, global_batch=global_batch, seed=seed, name="LocaLeReg"
+        )
+        with (
+            torch.autocast(device_type=states.device.type, enabled=False),
+            regularizer_rng(
+                states, distributed=distributed, seed=seed, generator=self._distributed_rng
+            ),
         ):
-            raise ValueError("LocaLeReg requires finite [time >= 1, batch >= 2, width >= 1] states")
-        if states.dtype != torch.float32 or states.device.type not in {"cpu", "cuda"}:
-            raise ValueError("LocaLeReg integration currently requires CPU/CUDA float32")
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            raise RuntimeError("Distributed LocaLeReg is not validated in this integration")
+            return self._loss(states)
+
+    def _loss(self, states: torch.Tensor) -> torch.Tensor:
         test = partial(ballreg_loss, center=True, num_slices=self.num_proj, n_quad=self.n_quad)
         losses, diagnostics = [], []
         for time_states in states:
