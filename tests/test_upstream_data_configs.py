@@ -210,7 +210,7 @@ def test_upstream_smoke_composes_without_downloads(make_config, name):
         ("trainer.precision=16-mixed", "only full FP32"),
         ("trainer.accelerator=mps", "MPS seeded RNG isolation"),
         ("trainer.accelerator=auto", "explicit cpu/cuda/gpu"),
-        ("data.batch_size=1", "SIGReg requires data.batch_size >= 2"),
+        ("data.batch_size=1", "regularization requires data.batch_size >= 2"),
         ("trainer.devices=2", "one device"),
         ("trainer.devices=auto", "one device"),
         ("+trainer.num_nodes=2", "one device"),
@@ -231,7 +231,7 @@ def test_upstream_real_audio_preflight_requires_no_padding(make_config):
 
 def test_upstream_real_audio_preflight_requires_minimum_batch_size(make_config):
     cfg = make_config(["experiment=upstream_hierarchical", "data.minimum_batch_size=1"])
-    with pytest.raises(ValueError, match="SIGReg requires data.minimum_batch_size >= 2"):
+    with pytest.raises(ValueError, match="regularization requires data.minimum_batch_size >= 2"):
         validate_config(cfg)
 
 

@@ -150,12 +150,14 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         raise ValueError("upstream forecasting requires data.require_full_length=true")
     if cfg.model.regularization_weight > 0:
         if cfg.data.batch_size < 2:
-            raise ValueError("SIGReg requires data.batch_size >= 2")
+            raise ValueError("regularization requires data.batch_size >= 2")
         if (
             cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
             and cfg.data.get("minimum_batch_size", 1) < 2
         ):
-            raise ValueError("SIGReg requires data.minimum_batch_size >= 2 for WAV datasets")
+            raise ValueError(
+                "regularization requires data.minimum_batch_size >= 2 for WAV datasets"
+            )
     if cfg.trainer.get("accelerator", "cpu") not in ("cpu", "cuda", "gpu"):
         raise ValueError(
             "upstream forecasting supports explicit cpu/cuda/gpu accelerators only; "

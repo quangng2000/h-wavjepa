@@ -24,6 +24,18 @@ The unmodified `tests/fixtures/h_jepa/loss.py` at the same revision is retained
 solely for independent numerical and gradient comparisons; its SHA-256 is recorded
 alongside it. The same MIT notice applies to that fixture.
 
+## LocaLeJEPA LocaLeReg
+
+`src/vendor/localereg/losses.py` is an unmodified copy of `src/losses.py` from
+[alessioborgi/LocaLeJEPA](https://github.com/alessioborgi/LocaLeJEPA), commit
+`771361c18d37e65df3dc188761ffb26751ce4e37`. The [MIT license and copyright
+notice](third_party/licenses/LocaLeJEPA.txt) are retained. The [manifest](src/vendor/localereg/UPSTREAM.json)
+records its Git blob and SHA-256 hashes, verified by a test. The audio adapter
+calls its built-in torch k-means backend; optional upstream packages are not needed.
+[Adaptations](docs/LOCALEREG.md) include independent per-time neighborhoods and
+a higher quadrature resolution for 768-dimensional latents. Reuse does not
+reproduce the paper's training experiment or establish audio benchmark gains.
+
 ## HEAR evaluation kit
 
 The optional isolated evaluator installs [hearbenchmark/hear-eval-kit](https://github.com/hearbenchmark/hear-eval-kit)

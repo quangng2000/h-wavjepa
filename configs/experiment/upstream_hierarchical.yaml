@@ -10,9 +10,10 @@ data:
   # A standard ten-second AudioSet clip is insufficient for this example preset.
   num_samples: 289440
   require_full_length: true
-  batch_size: 2
-  # SIGReg needs >=2 examples. Merge singleton tails into the previous batch;
-  # no validation/test recordings are dropped (a final batch may contain 3).
+  # Local matching needs several recordings per cluster. Tune to measured GPU memory.
+  batch_size: 32
+  # Both regularizers need >=2 examples. Merge singleton tails into the previous batch;
+  # no validation/test recordings are dropped (a final batch may contain 33).
   minimum_batch_size: 2
   num_workers: 0
 trainer:

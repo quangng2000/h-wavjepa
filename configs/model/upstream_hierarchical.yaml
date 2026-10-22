@@ -52,6 +52,13 @@ predictor_heads: 4
 prediction_weights: [1.0, 1.0, 1.0]
 masked_weight: 1.0
 regularization_weight: 0.1
+# LocaLeJEPA local uniform-ball matching, adapted independently per audio time step.
+# Switch to sigreg for the previous Gaussian control; checkpoints enforce this choice.
+regularizer_kind: localereg
+localereg_clusters: 4
+localereg_min_cluster_size: 4
+localereg_kmeans_iters: 10
+localereg_n_quad: 256
 ema_decay: 0.999
 ema_end_decay: 0.99999
 # Null anneals across the resolved optimizer-step budget (including accumulation).
@@ -62,4 +69,5 @@ lr_warmup_steps: null
 # Null derives the budget from Trainer. A resumed run keeps the saved budget.
 lr_total_steps: null
 eval_seed: 0
+# Legacy field name: random projection count for either selected regularizer.
 sigreg_projections: 128

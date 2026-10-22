@@ -12,7 +12,8 @@ The source subset, hashes, compatibility edits and licenses are recorded in
 | --- | --- | --- |
 | Waveform features, masked context/target prediction, EMA context encoder | [WavJEPA, Section 3.1](https://arxiv.org/html/2509.23238v1#S3.SS1), [pinned training source](https://github.com/labhamlet/wavjepa/tree/6f4e1b1f18316c50768c8523f325ccffeaa6985b) | Reuses the official core and masked loss. |
 | Compositional latent spaces at coarser temporal strides | [H-JEPA, Section 2.1, Eq. 1](https://arxiv.org/html/2610.06805v1#S2.SS1), [pinned three-level AntMaze configuration](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/config/train/ant_hjepa_l3.yaml) | Pointwise upper MLPs with state window size 1; default relative strides 2 then 2. |
-| Per-space future prediction and SIGReg | [H-JEPA, Section 2.1, Eqs. 2–3](https://arxiv.org/html/2610.06805v1#S2.SS1), [pinned loss implementation](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/loss.py) | Separate audio predictors and the attributed SIGReg implementation. |
+| Per-space future prediction and SIGReg | [H-JEPA, Section 2.1, Eqs. 2–3](https://arxiv.org/html/2610.06805v1#S2.SS1), [pinned loss implementation](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/loss.py) | Separate audio predictors; SIGReg remains available as a control. |
+| Local, centered uniform-ball distribution matching | [LocaLeJEPA, Section 4](https://arxiv.org/abs/2610.28458), [pinned loss implementation](https://github.com/alessioborgi/LocaLeJEPA/blob/771361c18d37e65df3dc188761ffb26751ce4e37/src/losses.py) | LocaLeReg is the default; clusters are formed across recordings separately at each time and level. See [audio adaptations](LOCALEREG.md). |
 
 H-JEPA's experiments use **state window size 1**. The general formulation allows
 larger windows, but this implementation follows the experimental pointwise choice.
@@ -68,13 +69,16 @@ optimal scales. A stride does **not** average the intervening windows: G2/G3
 are pointwise, and each target describes one future window rather than the entire
 interval up to it. All levels have the same width but distinct learned coordinates.
 
-The loss is original masked MSE plus weighted own-space future MSE plus SIGReg.
-SIGReg is reused from [H-JEPA](https://github.com/kevinghst/H-JEPA), commit
-`97054ecaff83e13839195ec4b92d74c08a0127c5`, under MIT. It is evaluated across
-recordings separately at each observed timestep, not by treating a recording's
-time steps as independent examples. The coefficient and projection count are
-configurable. It penalizes collapsed upper states; it does not prove preservation
-of useful information, successful optimization, or superiority over a flat model.
+The loss is original masked MSE plus weighted own-space future MSE plus
+regularization in each space. The default is LocaLeReg from LocaLeJEPA;
+`model.regularizer_kind=sigreg` retains SIGReg from H-JEPA commit
+`97054ecaff83e13839195ec4b92d74c08a0127c5`. Both are attributed under MIT and
+evaluated across recordings separately at each observed timestep. Time steps
+are not flattened into independent examples. Coefficients and projection counts
+are configurable. Positive collapse penalties do not prove useful semantics,
+successful optimization, or superiority over a flat model. The [LocaLeReg
+note](LOCALEREG.md) records partition diagnostics, local-loss scaling, and the
+limits of the accompanying Lean centering proof.
 
 Future targets use WavJEPA's existing EMA context Transformer and EMA copies of
 G2/G3, with stop-gradient targets. The frontend/norm/mapper remain shared and
@@ -148,7 +152,7 @@ The actual released weights were loaded and compared numerically against a
 separate hash-verified original source checkout; see [validation](VALIDATION.md).
 
 Use `upstream_flat` and `upstream_baseline` with the same data/budget overrides.
-The baseline disables future losses and SIGReg. It retains our chronological
+The baseline disables future losses and distribution regularization. It retains our chronological
 window sampling, FP32 execution and optimizer settings; it is an **adaptation
 control**, not a reproduction of the published 375k-step training run. The flat
 control removes G2/G3 parameters, so it is not exactly parameter-matched; report
@@ -176,11 +180,12 @@ with gradient accumulation. Continuing beyond a completed cosine budget is
 rejected. Choose the full `lr_total_steps` before an interrupted/partial run.
 Older checkpoints without schedule fields retain constant LR/EMA semantics.
 
-SIGReg requires at
-least two recordings per batch; the real-data presets enforce this, merging a
+Both regularizers require at least two recordings per batch; the real-data presets enforce this, merging a
 singleton final batch into the preceding batch without dropping held-out records.
-Each split must contain at least two recordings. Fixed batch layout is required
-for repeatable SIGReg evaluation; a changed last-batch size changes its statistic.
+Each split must contain at least two recordings. LocaLeReg needs larger batches
+for retained local neighborhoods: real-data presets request 32 and log global
+fallback frequency. Fixed batch layout is required for repeatable regularization
+evaluation; changed batches alter the statistic and, for LocaLeReg, the clusters.
 
 Resume/evaluate with the same model and data configuration:
 
@@ -226,7 +231,10 @@ origin per excerpt; it does not establish stable recursive rollouts or planning.
 ## Evidence and limits
 
 Independent checks compare original-source outputs/gradients and the attributed
-SIGReg formula. Tests also check actual upstream execution, gradients into the backbone and both
+SIGReg formula. LocaLeReg tests check the pinned source hash, per-time numerical
+and gradient parity, fixed-cluster centering, quadrature accuracy at width 768,
+cluster filtering, fallback diagnostics, and training/resume. Tests also check
+actual upstream execution, gradients into the backbone and both
 abstractions, future-input invariance, horizon indexing, collapsed-state penalty,
 teacher freezing/timing, checkpoint round trips, and Lightning resume. They do
 not establish useful representations or reproduce published scores. The source

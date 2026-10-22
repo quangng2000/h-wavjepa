@@ -23,6 +23,8 @@ from transformers import get_cosine_schedule_with_warmup
 
 from src.models.components.temporal_predictor import TemporalPredictor
 from src.models.components.wavjepa_backbone import WavJEPABackbone
+from src.objectives.localereg import SOURCE_COMMIT as LOCALEREG_COMMIT
+from src.objectives.localereg import LocaLeReg
 from src.objectives.sigreg import SOURCE_COMMIT as SIGREG_COMMIT
 from src.objectives.sigreg import SIGReg
 
@@ -40,6 +42,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     CHECKPOINT_KEY = "hierarchical_wavjepa"
     CHECKPOINT_SCHEMA_VERSION = 1
     SEMANTICS = "upstream_masked_plus_past_only_window_forecast_sigreg_v1"
+    LOCALEREG_SEMANTICS = "upstream_masked_plus_past_only_window_forecast_localereg_v1"
     SCHEDULE_CHECKPOINT_KEY = "hierarchical_wavjepa_training_schedule"
     # Missing fields in early schema-v1 checkpoints retain their old behavior.
     OPTIONAL_CONFIG_DEFAULTS = {
@@ -48,6 +51,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "lr_total_steps": None,
         "ema_end_decay": None,
         "ema_anneal_end_step": None,
+        "regularizer_kind": "sigreg",
+        "localereg_clusters": 4,
+        "localereg_min_cluster_size": 4,
+        "localereg_kmeans_iters": 10,
+        "localereg_n_quad": 256,
     }
 
     def __init__(
@@ -72,8 +80,23 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         lr_total_steps: int | None = None,
         ema_end_decay: float | None = None,
         ema_anneal_end_step: int | None = None,
+        regularizer_kind: str = "sigreg",
+        localereg_clusters: int = 4,
+        localereg_min_cluster_size: int = 4,
+        localereg_kmeans_iters: int = 10,
+        localereg_n_quad: int = 256,
     ) -> None:
         super().__init__()
+        if regularizer_kind not in {"sigreg", "localereg"}:
+            raise ValueError("regularizer_kind must be sigreg or localereg")
+        for name, value, minimum in (
+            ("localereg_clusters", localereg_clusters, 1),
+            ("localereg_min_cluster_size", localereg_min_cluster_size, 2),
+            ("localereg_kmeans_iters", localereg_kmeans_iters, 1),
+            ("localereg_n_quad", localereg_n_quad, 2),
+        ):
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
         for name, value in (
             ("context_windows", context_windows),
             ("hidden_dim", hidden_dim),
@@ -159,7 +182,18 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             else nn.Identity()
             for weight in prediction_weights
         )
-        self.regularizer = SIGReg(num_proj=sigreg_projections)
+        self.regularizer_kind = regularizer_kind
+        self.regularizer = (
+            LocaLeReg(
+                num_proj=sigreg_projections,
+                num_clusters=localereg_clusters,
+                min_cluster_size=localereg_min_cluster_size,
+                kmeans_iters=localereg_kmeans_iters,
+                n_quad=localereg_n_quad,
+            )
+            if regularizer_kind == "localereg"
+            else SIGReg(num_proj=sigreg_projections)
+        )
         self.register_buffer("ema_updates", torch.tensor(0, dtype=torch.long))
         self.config = {
             "context_windows": context_windows,
@@ -175,6 +209,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "ema_decay": self.ema_decay,
             "eval_seed": eval_seed,
             "sigreg_projections": sigreg_projections,
+            "regularizer_kind": regularizer_kind,
+            "localereg_clusters": localereg_clusters,
+            "localereg_min_cluster_size": localereg_min_cluster_size,
+            "localereg_kmeans_iters": localereg_kmeans_iters,
+            "localereg_n_quad": localereg_n_quad,
             "lr_schedule": lr_schedule,
             "lr_warmup_steps": lr_warmup_steps,
             "lr_total_steps": lr_total_steps,
@@ -287,6 +326,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         masked = self.backbone.masked_loss(windows, seed=seed) if self.masked_weight else zero
         terms, reg_terms = [zero] * 3, [zero] * 3
         levels, predictions, targets = [], [], []
+        regularization_stats = []
         if any(self.prediction_weights) or self.regularization_weight:
             # Encode ONLY the prefix for the online forecasting path. The separate
             # masked anchor may use all windows, but shares no contextual activations.
@@ -310,14 +350,19 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                 # separately below. MPS evaluation is rejected until RNG isolation
                 # can be guaranteed by this helper.
                 if seed is not None and waveform.device.type not in {"cpu", "cuda"}:
-                    raise ValueError("Seeded SIGReg evaluation currently supports CPU/CUDA only")
+                    raise ValueError("Seeded regularization currently supports CPU/CUDA only")
                 devices = [waveform.device.index or 0] if waveform.device.type == "cuda" else []
                 with torch.random.fork_rng(devices=devices, enabled=seed is not None):
                     if seed is not None:
                         torch.random.default_generator.manual_seed(seed)
                         for device in devices:
                             torch.cuda.default_generators[device].manual_seed(seed)
-                    reg_terms = [self.regularizer(level.transpose(0, 1)) for level in levels]
+                    reg_terms = []
+                    for level in levels:
+                        reg_terms.append(self.regularizer(level.transpose(0, 1)))
+                        regularization_stats.append(
+                            dict(getattr(self.regularizer, "last_stats", {}))
+                        )
         prediction_loss = sum(
             (weight * loss for weight, loss in zip(self.prediction_weights, terms, strict=True)),
             start=zero,
@@ -337,6 +382,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "regularization_loss": regularization_loss,
             "prediction_terms": terms,
             "regularization_terms": reg_terms,
+            "regularization_stats": regularization_stats,
             "levels": levels,
             "predictions": predictions,
             "targets": targets,
@@ -352,7 +398,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             zip(result["prediction_terms"], result["regularization_terms"], strict=True)
         ):
             self.log(f"{stage}/level_{i}/prediction_loss", term, **kwargs)
-            self.log(f"{stage}/level_{i}/sigreg", penalty, **kwargs)
+            self.log(f"{stage}/level_{i}/{self.regularizer_kind}", penalty, **kwargs)
+        for i, stats in enumerate(result["regularization_stats"]):
+            for name, value in stats.items():
+                self.log(f"{stage}/level_{i}/localereg_{name}", value, **kwargs)
         for i, level in enumerate(result["levels"]):
             self.log(
                 f"{stage}/level_{i}/batch_std", level.std(dim=0, unbiased=False).mean(), **kwargs
@@ -461,9 +510,16 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     def checkpoint_metadata(self) -> dict[str, Any]:
         return {
             "schema_version": self.CHECKPOINT_SCHEMA_VERSION,
-            "semantics": self.SEMANTICS,
+            "semantics": (
+                self.LOCALEREG_SEMANTICS if self.regularizer_kind == "localereg" else self.SEMANTICS
+            ),
             "upstream_commit": self.backbone.source_commit,
             "sigreg_commit": SIGREG_COMMIT,
+            **(
+                {"localereg_commit": LOCALEREG_COMMIT}
+                if self.regularizer_kind == "localereg"
+                else {}
+            ),
             "backbone": self.backbone.construction_config(),
             "dynamics": deepcopy(self.config),
         }
@@ -471,19 +527,23 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     @classmethod
     def validated_checkpoint_metadata(cls, checkpoint: dict) -> dict:
         metadata = checkpoint.get(cls.CHECKPOINT_KEY)
-        if not isinstance(metadata, dict) or set(metadata) != {
+        if not isinstance(metadata, dict):
+            raise ValueError("missing or invalid hierarchical WavJEPA checkpoint metadata")
+        is_local = metadata.get("semantics") == cls.LOCALEREG_SEMANTICS
+        required = {
             "schema_version",
             "semantics",
             "upstream_commit",
             "sigreg_commit",
             "backbone",
             "dynamics",
-        }:
+        } | ({"localereg_commit"} if is_local else set())
+        if set(metadata) != required:
             raise ValueError("missing or invalid hierarchical WavJEPA checkpoint metadata")
         if (
             type(metadata["schema_version"]) is not int
             or metadata["schema_version"] != cls.CHECKPOINT_SCHEMA_VERSION
-            or metadata["semantics"] != cls.SEMANTICS
+            or metadata["semantics"] not in {cls.SEMANTICS, cls.LOCALEREG_SEMANTICS}
         ):
             raise ValueError("incompatible hierarchical WavJEPA checkpoint semantics")
         if not isinstance(metadata["backbone"], dict) or not isinstance(metadata["dynamics"], dict):
@@ -494,6 +554,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("checkpoint metadata must contain finite plain data") from error
         normalized = deepcopy(metadata)
         normalized["dynamics"] = cls.OPTIONAL_CONFIG_DEFAULTS | normalized["dynamics"]
+        if normalized["dynamics"]["regularizer_kind"] != (
+            "localereg" if is_local else "sigreg"
+        ) or (is_local and metadata["localereg_commit"] != LOCALEREG_COMMIT):
+            raise ValueError("checkpoint regularizer kind or source revision mismatch")
         return normalized
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:

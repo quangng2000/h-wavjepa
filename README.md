@@ -4,7 +4,7 @@
 [![Lightning](https://img.shields.io/badge/Lightning-792EE5?logo=lightning&logoColor=white)](https://lightning.ai/docs/pytorch/stable/)
 [![Hydra](https://img.shields.io/badge/config-Hydra-89b8cd)](https://hydra.cc/)
 
-Learn **three latent audio spaces at different prediction horizons** using the official [WavJEPA](https://github.com/labhamlet/wavjepa) backbone, [H-JEPA](https://github.com/kevinghst/H-JEPA) SIGReg, and the [Lightning–Hydra template](docs/TEMPLATE.md).
+Learn **three latent audio spaces at different prediction horizons** using the official [WavJEPA](https://github.com/labhamlet/wavjepa) backbone, the [H-JEPA](https://github.com/kevinghst/H-JEPA) hierarchy, and [LocaLeJEPA's LocaLeReg](https://arxiv.org/abs/2610.28458) regularizer. Training uses the [Lightning–Hydra template](docs/TEMPLATE.md).
 
 The model retains WavJEPA's masked objective and adds two learned abstractions and three future predictors. Released WavJEPA weights can initialize the backbone; the new hierarchy starts fresh. This is a research implementation with no demonstrated benchmark improvement yet.
 
@@ -22,7 +22,7 @@ uv run python -m src.train           # tiny official-backbone smoke run
 uv run --extra hear pytest
 ```
 
-The smoke run uses generated audio and random weights; it downloads no model or dataset.
+The smoke run uses generated audio and random weights; it downloads no model or dataset. Its two-example batches exercise LocaLeReg's global fallback. Tests also exercise retained local clusters with larger batches.
 
 ## Train with pretrained WavJEPA
 
@@ -43,6 +43,8 @@ This explicitly downloads the pinned, checksum-verified base weights (~785 MB), 
 
 Inputs are mono PCM16 WAV at 16 kHz. The example preset requires **18.09 seconds of contiguous audio per file**, at least two files per split, and single-device FP32. Short training clips are rejected. CPU is tested; CUDA performance is unvalidated.
 
+**LocaLeReg is selected by default** at all three levels. It forms embedding-space neighborhoods across recordings separately at each time step, centers each retained cluster, and matches its residuals to a uniform ball. The real-data presets use batches of 32 with up to four clusters; GPU memory requirements are unmeasured. Monitor cluster/fallback diagnostics, especially after reducing batch size. See [source attribution, settings, and limitations](docs/LOCALEREG.md).
+
 ## Experiments and evaluation
 
 | Experiment | Purpose |
@@ -50,9 +52,12 @@ Inputs are mono PCM16 WAV at 16 kHz. The example preset requires **18.09 seconds
 | `upstream_pretrained` | Three spaces, initialized from released WavJEPA weights |
 | `upstream_hierarchical` | Same architecture, random initialization |
 | `upstream_flat` | Shared-space multi-horizon control |
+| `upstream_sigreg` | Hierarchical model with the previous SIGReg regularizer |
 | `upstream_baseline` | Original masked-loss adaptation control |
 
 Use identical data, initialization and budgets for comparisons. Presets use warmup/cosine learning rates and annealed EMA. Runs and checkpoints live in `logs/train/runs/`; add `ckpt_path=/path/last.ckpt` to resume the same planned schedule.
+
+For a SIGReg control with pretrained initialization, use `experiment=upstream_pretrained model.regularizer_kind=sigreg`. Resume must retain the checkpoint's regularizer; when resuming older SIGReg runs, select SIGReg explicitly. Regularizer coefficients and optimization settings need validation tuning for both methods; their numerical loss scales are not interchangeable.
 
 - **Downstream quality:** [HEAR export and official evaluation](docs/HEAR.md), separately for low, medium, high, or backbone tokens.
 - **Objective diagnostics:** `uv run python -m src.eval experiment=upstream_hierarchical ckpt_path=/path/last.ckpt` with the same data overrides.

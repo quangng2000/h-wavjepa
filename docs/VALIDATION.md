@@ -32,6 +32,14 @@ warmup/cosine schedules, accumulation, checkpoint resume and legacy compatibilit
 It also exercises actual WAV training/evaluation, explicit dynamics embedding
 export, checkpoint hashes and finite-value/input validation.
 
+LocaLeReg checks cover byte-exact upstream source hashes, timewise adapter
+value/gradient agreement, fixed-cluster translation invariance, cluster filtering
+and fallback reporting, and independent float64 target-distribution quadrature at
+width 768. Tiny CPU training checks cover local clusters, gradients into the
+online waveform/context encoders and upper MLPs, checkpoint inference, and resume.
+These tests do not measure learned audio quality. The companion Lean build and
+axiom audit check only the stated [centering property](LOCALEREG.md#what-lean-establishes).
+
 Run:
 
 ```bash

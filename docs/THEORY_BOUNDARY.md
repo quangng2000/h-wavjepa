@@ -2,10 +2,18 @@
 
 The table and information-flow contract below describe the original prototype.
 The [upstream-backed hierarchical dynamics extension](UPSTREAM_DYNAMICS.md)
-uses learned own-space EMA targets and SIGReg, not the protected raw-patch branch.
+uses learned own-space EMA targets and LocaLeReg (or the SIGReg control), not the protected raw-patch branch.
 No existing Lean result certifies its nonlinear training, temporal abstractions,
-generalization or benefit over WavJEPA. SIGReg is an explicit collapse penalty,
-not a theorem that slow or task-relevant information is retained.
+generalization or benefit over WavJEPA. Distribution-matching penalties do not
+establish that slow or task-relevant information is retained.
+
+The companion [LocalRegularization.lean](https://github.com/quangng2000/hjepa-lean/blob/main/HJepa/LocalRegularization.lean)
+proves that subtracting a fixed nonempty cluster's mean removes a common vector
+translation, and that losses of those residuals inherit this property. This
+uses exact real arithmetic and fixed assignments. Recomputed cosine k-means
+assignments may change under translation; the proof does not verify the Python
+implementation or establish non-collapse, convergence, or better audio results.
+See [LocaLeReg's implementation boundary](LOCALEREG.md).
 
 The authoritative theorem ledger is [hjepa-lean](https://github.com/quangng2000/hjepa-lean/blob/main/THEORY.md). This repository contains ordinary Python/PyTorch, not extracted or formally verified code.
 
