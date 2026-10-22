@@ -1,7 +1,4 @@
 # @package _global_
-tags: [two-level, protected, research]
-model:
-  encoder:
-    widths: [32, 48]
-    pool_factors: [2]
-  prediction_weights: [1.0, 1.0]
+# Compatibility alias for the archived independent prototype.
+defaults:
+  - /experiment/legacy/two_level

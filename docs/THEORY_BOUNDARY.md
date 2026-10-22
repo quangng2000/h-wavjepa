@@ -1,4 +1,8 @@
-# Theory-to-code obligations
+# Archived prototype theory-to-code obligations
+
+**Historical, frozen prototype ledger.** The implementation is archived under
+[`src/legacy`](../src/legacy/README.md). These obligations describe that model
+family and do not certify the active upstream-backed training route.
 
 The table and information-flow contract below describe the original prototype.
 The [upstream-backed hierarchical dynamics extension](UPSTREAM_DYNAMICS.md)

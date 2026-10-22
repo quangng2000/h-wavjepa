@@ -69,6 +69,8 @@ def test_real_wav_train_evaluate_and_extract(make_config, tmp_path):
         sys.executable,
         "-m",
         "src.embed",
+        "--model-family",
+        "legacy",
         "--checkpoint",
         checkpoint,
         "--manifest",

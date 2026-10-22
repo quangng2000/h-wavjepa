@@ -1,6 +1,9 @@
-# Usage
+# Archived prototype usage
 
-This page covers the earlier independent prototype. For the new official-WavJEPA
+**Historical, frozen research route.** Its implementation lives in
+[`src/legacy`](../src/legacy/README.md); existing imports, checkpoints and experiment
+names remain compatibility interfaces. New experiments should use AudioSet/upstream
+presets. This page covers the earlier independent prototype. For the new official-WavJEPA
 training extension, use [Upstream dynamics](UPSTREAM_DYNAMICS.md).
 
 Run commands from the repository after `uv sync --frozen`. Direct-script train/eval entry points also discover the checkout from another directory. Hydra configs execute Python construction instructions; use trusted configurations only.
@@ -12,16 +15,16 @@ uv run python -m src.validate_data \
   --train /data/train.jsonl --val /data/val.jsonl --test /data/test.jsonl \
   --sample-rate 16000 --num-samples 128000
 
-uv run python src/train.py experiment=audio trainer=cpu \
+uv run python src/train.py experiment=legacy/audio trainer=cpu \
   data.train_manifest=/data/train.jsonl \
   data.val_manifest=/data/val.jsonl \
   data.test_manifest=/data/test.jsonl \
   trainer.max_epochs=20 data.batch_size=8
 ```
 
-All three manifests are required, even when test evaluation is disabled. Each JSONL record has a nonempty `path`; relative paths resolve against the manifest directory. WAVs must already be uncompressed 16-bit PCM, mono, and at the configured sample rate. Inputs are start-cropped or right zero-padded. Padded samples contribute to loss: consistently prepare clips for meaningful experiments.
+All three manifests are required, even when test evaluation is disabled. Each JSONL record has a nonempty `path`; relative paths resolve against the manifest directory. WAVs must already be uncompressed 16-bit PCM, mono, and at the configured sample rate. Training samples a random contiguous crop from longer segments; validation and extraction start at the manifest offset. Short segments are right zero-padded in this legacy route. Padded samples contribute to loss: consistently prepare clips for meaningful experiments.
 
-Optional `group_id` and `recording_id` enforce known group separation. If a field appears anywhere, it must appear on **every** record across all splits. The same ID may repeat inside a split, not across splits. Choose appropriate independent units such as speaker, performer or original recording. Duplicate resolved paths and physical aliases, including symlinks/hardlinks, are rejected.
+Optional `group_id` and `recording_id` enforce known group separation. If a field appears anywhere, it must appear on **every** record across all splits. The same ID may repeat inside a split, not across splits. Choose appropriate independent units such as speaker, performer or original recording. Multiple declared segments of one recording may appear within one split. Optional `offset_samples` and `segment_samples` delimit each segment at the configured sample rate. Duplicate physical segments and any recording shared across splits, including symlink/hardlink aliases, are rejected.
 
 Validation checks headers and declared payload ends without decoding/hashing the entire corpus. Reports include file counts and padded/cropped clip counts. Copied recordings, overlapping crops and incorrect labels are not detectable by these checks. Keep files immutable during runs.
 
@@ -44,15 +47,15 @@ Standard loader settings are exposed: `data.num_workers`, `pin_memory`, `persist
 ## Comparisons and sweeps
 
 ```bash
-uv run python src/train.py experiment=hwavjepa
-uv run python src/train.py experiment=hwavjepa_unprotected
-uv run python src/train.py experiment=flat
-uv run python src/train.py experiment=flat_protected
-uv run python src/train.py experiment=two_level
+uv run python src/train.py experiment=legacy/hwavjepa
+uv run python src/train.py experiment=legacy/hwavjepa_unprotected
+uv run python src/train.py experiment=legacy/flat
+uv run python src/train.py experiment=legacy/flat_protected
+uv run python src/train.py experiment=legacy/two_level
 
-uv run python src/train.py -m experiment=smoke seed=1,2,3
-uv run python src/train.py experiment=smoke debug=fdr
-uv run python src/train.py -m experiment=smoke debug=fdr \
+uv run python src/train.py -m experiment=legacy/smoke seed=1,2,3
+uv run python src/train.py experiment=legacy/smoke debug=fdr
+uv run python src/train.py -m experiment=legacy/smoke debug=fdr \
   hparams_search=hwavjepa_optuna hydra.sweeper.n_trials=2
 ```
 
@@ -64,12 +67,12 @@ Comparison presets use small synthetic fixtures unless `data=wav` and manifests 
 
 ```bash
 # Include the same model/data overrides used for the original run.
-uv run python src/train.py experiment=audio \
+uv run python src/train.py experiment=legacy/audio \
   data.train_manifest=/data/train.jsonl data.val_manifest=/data/val.jsonl \
   data.test_manifest=/data/test.jsonl \
   ckpt_path=/runs/previous/checkpoints/last.ckpt trainer.max_epochs=40
 
-uv run python src/eval.py experiment=audio \
+uv run python src/eval.py experiment=legacy/audio \
   data.train_manifest=/data/train.jsonl data.val_manifest=/data/val.jsonl \
   data.test_manifest=/data/test.jsonl ckpt_path=/runs/previous/checkpoints/last.ckpt
 ```
@@ -85,7 +88,7 @@ Architecture, objective, masking, EMA, protection and sample rate must match the
 ## Extract features
 
 ```bash
-uv run python -m src.embed --checkpoint /runs/previous/checkpoints/last.ckpt \
+uv run python -m src.embed --model-family legacy --checkpoint /runs/previous/checkpoints/last.ckpt \
   --manifest /data/test.jsonl --output artifacts/test-embeddings \
   --num-samples 128000 --batch-size 16 --device cpu
 ```
@@ -93,7 +96,7 @@ uv run python -m src.embed --checkpoint /runs/previous/checkpoints/last.ckpt \
 Architecture and sample rate come from checkpoint metadata, without executing saved Hydra YAML. Clip length is explicit; use the training length for comparable features. The full training checkpoint is loaded into host memory, then waveform batches/features stream in bounded-size shards. This is not a low-memory checkpoint loader or serving system.
 
 - `metadata.json`: status, hashes, sample rate, clip length, widths, shard count. Only `completed` indicates success.
-- `index.jsonl`: original path, shard filename and row per input.
+- `index.jsonl`: original path, manifest offset/segment length, shard filename and row per input.
 - `batch-000000.pt`, etc.: `levels`, a list of `[batch, width]` tensors, plus optional `protected`. Read with `torch.load(path, weights_only=True)`.
 
 Extraction mean-pools temporal tokens. Pooling can discard information; the protected-stream theory does not certify these vectors. For full tokens:

@@ -1,6 +1,7 @@
 """Explicit safe inference loader for upstream-backed dynamics checkpoints.
 
-The legacy src.inference/src.embed route remains a different model family.
+The legacy src.inference loader remains a different model family; src.embed
+selects this loader by default and the legacy loader with --model-family legacy.
 No checkpoint-controlled Hydra target or arbitrary serialized object is executed.
 """
 

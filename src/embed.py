@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from src.data.wav_datamodule import WAVManifestDataset, _manifest_paths
+from src.data.wav_datamodule import WAVManifestDataset, _manifest_entries
 from src.dynamics_inference import load_model as load_dynamics_model
 from src.inference import load_model
 from src.utils.runtime import atomic_json, file_sha256
@@ -25,8 +25,10 @@ def extract_embeddings(
 ) -> dict:
     """Extract one vector per hierarchy level/file, plus the protected vector.
 
-    Temporal mean pooling is a downstream readout choice, not a guarantee that
-    the pooled vector preserves the token-level protected information.
+    The Python API retains its legacy default for existing callers; the CLI
+    defaults to the active dynamics family. Pass model_family explicitly in new
+    code. Temporal mean pooling does not guarantee preservation of token-level
+    information.
     """
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
@@ -51,9 +53,9 @@ def extract_embeddings(
     )
     if type(num_samples) is not int or num_samples < divisor or num_samples % divisor:
         raise ValueError(f"num_samples must be a positive multiple of {divisor}")
-    paths = _manifest_paths(manifest)
+    entries = _manifest_entries(manifest)
     dataset = WAVManifestDataset(
-        paths,
+        entries,
         sample_rate=sample_rate,
         num_samples=num_samples,
         require_full_length=model_family == "dynamics",
@@ -108,9 +110,18 @@ def extract_embeddings(
                     torch.save(shard, temporary)
                     temporary.replace(directory / name)
                     size = batch["waveform"].shape[0]
-                    for row, path in enumerate(paths[offset : offset + size]):
+                    for row, entry in enumerate(entries[offset : offset + size]):
                         index.write(
-                            json.dumps({"path": str(path), "shard": name, "row": row}) + "\n"
+                            json.dumps(
+                                {
+                                    "path": str(entry.path),
+                                    "offset_samples": entry.offset_samples,
+                                    "segment_samples": entry.segment_samples,
+                                    "shard": name,
+                                    "row": row,
+                                }
+                            )
+                            + "\n"
                         )
                     offset += size
                     record["shards"] += 1
@@ -140,8 +151,8 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--model-family",
-        choices=("legacy", "dynamics"),
-        default="legacy",
+        choices=("dynamics", "legacy"),
+        default="dynamics",
         help="Checkpoint family; dynamics uses the official WavJEPA backbone and training strides",
     )
     parser.add_argument("--num-threads", type=int, default=1)

@@ -1,6 +1,4 @@
 # @package _global_
+# Compatibility alias for the archived independent prototype.
 defaults:
-  - override /model: flat
-tags: [flat, protected, research]
-model:
-  protection_weight: 1.0
+  - /experiment/legacy/flat_protected

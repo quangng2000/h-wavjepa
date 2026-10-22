@@ -1,2 +1,4 @@
 # @package _global_
-tags: [three-level, protected, research]
+# Compatibility alias for the archived independent prototype.
+defaults:
+  - /experiment/legacy/hwavjepa

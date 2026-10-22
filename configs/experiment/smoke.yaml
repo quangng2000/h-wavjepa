@@ -1,16 +1,4 @@
 # @package _global_
-tags: [smoke, not-a-benchmark]
-trainer:
-  max_epochs: 1
-  limit_train_batches: 2
-  limit_val_batches: 1
-  limit_test_batches: 1
-  enable_progress_bar: false
-# An explicit progress-bar callback conflicts with enable_progress_bar: false.
-callbacks:
-  rich_progress_bar: null
-  model_summary: null
-data:
-  train_size: 8
-  val_size: 4
-  test_size: 4
+# Compatibility alias for the archived independent prototype.
+defaults:
+  - /experiment/legacy/smoke

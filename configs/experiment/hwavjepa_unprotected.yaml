@@ -1,4 +1,4 @@
 # @package _global_
-tags: [three-level, unprotected, research]
-model:
-  protection_weight: 0.0
+# Compatibility alias for the archived independent prototype.
+defaults:
+  - /experiment/legacy/hwavjepa_unprotected
