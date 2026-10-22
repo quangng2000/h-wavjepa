@@ -6,7 +6,7 @@
 
 Three latent audio spaces built on the official [WavJEPA](https://github.com/labhamlet/wavjepa) training core, using [H-JEPA](https://github.com/kevinghst/H-JEPA)'s pointwise hierarchy and [LocaLeReg](docs/LOCALEREG.md). Experiments follow the [Lightning–Hydra template](docs/TEMPLATE.md).
 
-The model retains masked prediction and adds three future predictors. Upper states transform individual windows; they **do not aggregate longer audio intervals**. This is a research baseline with no demonstrated benchmark improvement or measured two-H100 throughput yet.
+The model retains masked prediction and adds three future predictors. Upper states transform individual windows; they **do not aggregate longer audio intervals**. This is a research baseline with no demonstrated benchmark improvement yet.
 
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
@@ -22,7 +22,7 @@ uv run python -m src.train              # tiny generated-audio smoke run
 uv run --extra hear pytest
 ```
 
-The smoke run downloads no data or weights. CPU tests cover model, gradient, checkpoint, sampling, and distributed behavior; GPU hardware validation is pending.
+The smoke run downloads no data or weights. Tests cover model, gradient, checkpoint, sampling, and distributed behavior. A two-H100 BF16 train/resume test and three full-model generated-audio updates also passed; see [validation evidence](docs/VALIDATION.md).
 
 ## Train on AudioSet
 
@@ -45,7 +45,7 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 -m src.train \
   hydra.run.dir=/checkpoints/hwavjepa/run-001
 ```
 
-This selects DDP, BF16 mixed precision, gradient checkpointing, and 32 examples per GPU. Regularizers gather the **64-example global batch**; gradient accumulation does not enlarge that population. Training samples a new contiguous 9.09-second excerpt per epoch, so 10-second clips fit without padding. Memory capacity and throughput must be checked on the target GPUs before a full run.
+This selects DDP, BF16 mixed precision, gradient checkpointing, and 32 examples per GPU. Regularizers gather the **64-example global batch**; gradient accumulation does not enlarge that population. Training samples a new contiguous 9.09-second excerpt per epoch, so 10-second clips fit without padding. Three full-model updates on two H100 80 GB GPUs used about **29.4 GiB peak allocated memory per GPU**. Sustained AudioSet throughput and total training time still require a real-data benchmark.
 
 [AudioSet guide](docs/AUDIOSET.md): manifest segments, pretrained initialization, exact timing, checkpoint resume, and evaluation. This adaptation uses the original 375,000-step budget, **not the original eight random two-second crop recipe**.
 

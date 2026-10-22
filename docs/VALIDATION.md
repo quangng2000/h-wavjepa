@@ -3,9 +3,10 @@
 Validated locally on CPU on 22 October 2026. These checks establish software
 behavior, not improved representation quality or reproduced benchmark scores.
 
-The current local suite reports **454 passed, 1 skipped**. The skipped case needs
-two BF16-capable CUDA devices. Ruff and an independent original-source comparison
-are checked separately. No H100 hardware run has completed for this revision.
+The local suite reports **454 passed, 1 skipped**. The skipped case needs two
+BF16-capable CUDA devices and subsequently **passed on two H100s**, as recorded
+below. Ruff and an independent original-source comparison also pass. GitHub CI
+passed on Python 3.11, 3.12 and 3.13, plus the separate official HEAR smoke.
 
 ## Official WavJEPA reuse
 
@@ -76,6 +77,33 @@ uv run --extra hear pytest
 uv run python -m src.train experiment=upstream_smoke
 ```
 
+## Two-H100 smoke
+
+On 22 October 2026, commit `4a9b09a80b4e1fac2bb63a856606574a96e78e8f`
+completed a bounded cloud test on **two NVIDIA H100 80GB HBM3 GPUs**, using
+PyTorch 2.13.0+cu126, CUDA 12.6 and Lightning 2.6.6. The CUDA/BF16 variant of
+`tests/test_dynamics_ddp.py` passed with no skips, covering two-rank training,
+gradient checkpointing, accumulation, WAV sampling, checkpoint resume, equal
+rank-state hashes, and EMA timing.
+
+The same job then completed **three full-base optimizer updates**, with 32
+generated recordings per GPU (64 globally), nine 16,160-sample windows per
+recording, BF16 mixed precision, checkpointing, the pointwise hierarchy, and
+LocaLeReg. Both ranks finished with three EMA updates. Peak CUDA allocation was
+**29.405 GiB per GPU**, with **33.344 GiB reserved**. The slower rank's three
+observed batch times were 1.659, 0.905 and 0.663 seconds.
+
+These are preliminary capacity and correctness observations. Three updates on
+generated audio do not measure corpus loading, checkpoint/validation overhead,
+stable throughput, convergence, or full-training duration. The probe uses a
+short learning-rate/EMA schedule and downloads neither AudioSet nor pretrained
+weights. A longer pilot on the intended corpus is still required.
+
+The [machine-readable record](validation/h100-smoke-2026-10-22.json) contains
+both ranks' measurements. Reproduce with the
+[bounded smoke procedure](../scripts/GPU_SMOKE.md); the image verifies its
+Torch/CUDA versions before GPU allocation.
+
 ## HEAR
 
 The adapter tests cover low/medium/high and fine backbone readouts, variable clip
@@ -91,8 +119,9 @@ compatibility fix for chosen-epoch postprocessing. The other guarded patch makes
 TensorFlow optional for PyTorch-only packaging. These generated-data scores are
 integration evidence only; they are not reported as model-quality results.
 
-No real benchmark dataset or H100 training result is claimed. Distributed and
-mixed-precision evidence above comes from generated audio on CPU. The new
-abstractions and forecasting heads still require training and controlled
-downstream comparisons. The hierarchy remains the pointwise baseline: strides
-change the sampled state grid, and the upper MLPs do not pool adjacent windows.
+No real benchmark or model-quality result is claimed. Distributed and
+mixed-precision evidence comes from generated audio on CPU and the short H100
+smoke above. The new abstractions and forecasting heads still require training
+and controlled downstream comparisons. The hierarchy remains the pointwise
+baseline: strides change the sampled state grid, and the upper MLPs do not pool
+adjacent windows.

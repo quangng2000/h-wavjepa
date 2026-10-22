@@ -2,9 +2,11 @@
 
 The AudioSet presets keep the pointwise hierarchy and fit a chronological
 excerpt inside a real ten-second clip. The two-H100 preset enables DDP, BF16
-mixed precision, and activation checkpointing. CPU distributed tests exercise
-these integration paths; **target-GPU memory, throughput, and wall time remain
-unmeasured**. No GPU result should be inferred from the preset name.
+mixed precision, and activation checkpointing. A two-rank CUDA BF16 train/resume
+test passed, followed by three full-base-model updates on generated waveforms
+on two NVIDIA H100 80 GB HBM3 GPUs. This verifies GPU execution and memory fit
+for that short run; sustained AudioSet throughput and full training time remain
+unmeasured. See [recorded validation evidence](VALIDATION.md).
 
 ## Experimental recipe
 
@@ -137,9 +139,20 @@ are local to each rank, so their population differs from training's global
 population. Distributed held-out sampling can pad the tail; it is suitable for
 training diagnostics, but final metrics should use one device as below.
 
-Benchmark real loading and training before the full budget. Keep the planned
-learning-rate/EMA schedule fixed when stopping a pilot early. Hardware
-validation and a reliable two-H100 duration estimate are still pending.
+A hardware smoke run tested commit
+`4a9b09a80b4e1fac2bb63a856606574a96e78e8f` with PyTorch 2.13.0+cu126,
+CUDA 12.6, and Lightning 2.6.6 on two NVIDIA H100 80 GB HBM3 GPUs. The full model
+used nine 16,160-sample windows per example and 32 examples per rank (64 global).
+Each rank completed three optimizer updates and three EMA updates. Peak memory
+per GPU was 29.40 GiB allocated and 33.34 GiB reserved. Rank 1's three update
+times were 1.659, 0.905, and 0.663 seconds; this very short, changing sequence
+is **not a sustained throughput measurement or a full-training estimate**.
+The separate tiny two-rank CUDA BF16 training/resume test also passed.
+
+These checks used generated audio, downloaded no AudioSet data, and provide no
+representation-quality result. Benchmark real loading and training before the
+full budget. Keep the planned learning-rate/EMA schedule fixed when stopping
+a pilot early. [Validation](VALIDATION.md) records the evidence and limits.
 
 ## Resume the planned budget
 

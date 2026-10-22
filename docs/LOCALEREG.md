@@ -60,7 +60,7 @@ does not guarantee that neighborhoods correspond to speakers or sound classes.
 | `localereg_n_quad` | 256 | Higher than upstream's 64 to resolve width 768. |
 | Frequency knots/range | 17 / `[0,3]` | Upstream defaults. |
 | `regularization_weight` | 0.1 | Initial experiment setting, not a tuned optimum. |
-| AudioSet H100 population | 32/rank × 2 ranks = 64 | Actual per-call training population; GPU memory and throughput unmeasured. |
+| AudioSet H100 population | 32/rank × 2 ranks = 64 | Exercised in three full-model generated-audio updates on two H100s; sustained real-data throughput unmeasured. |
 
 At width 768, 64 quadrature nodes give a maximum characteristic-function error
 over 0.2 on the 17-point grid against an independent float64 512-node calculation.
@@ -87,7 +87,11 @@ BF16 states are gathered/cast with gradient tracking, then the statistic runs in
 FP32 with autocast disabled. Random projections and cluster initialization use
 synchronized, reproducible seeds. No additional world-size loss divisor is needed.
 Two-process CPU tests compare losses and DDP gradients against a concatenated
-single-process reference; target-GPU validation remains pending.
+single-process reference. A tiny two-H100 CUDA BF16 train/resume test passed.
+The full model then completed three generated-audio updates at the configured
+global population of 64. Peak allocated memory was approximately 29.4 GiB per GPU in that short
+run; [validation evidence](VALIDATION.md) separates these checks from sustained
+real-data throughput and downstream-quality claims.
 
 Validation/test statistics use local populations without all-gather, and
 multi-device held-out sampling can repeat tail entries. Training and validation
@@ -115,7 +119,8 @@ changed regularizer, cluster setting, quadrature setting, or source revision.
 Select `model.regularizer_kind=sigreg` when resuming an older run. New presets
 also select matched student/teacher normalized top-layer readouts; old checkpoints
 retain their previous readout semantics. Runtime support includes CPU/CUDA FP32
-and BF16 mixed precision with DDP; hardware performance has not been measured.
+and BF16 mixed precision with DDP. The short two-H100 hardware smoke passed;
+full AudioSet training, sustained throughput, and quality remain unvalidated.
 
 ## What Lean establishes
 

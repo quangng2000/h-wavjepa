@@ -1,0 +1,94 @@
+{
+  "tested_commit": "4a9b09a80b4e1fac2bb63a856606574a96e78e8f",
+  "date_utc": "2026-10-22",
+  "hardware": {
+    "torch": "2.13.0+cu126",
+    "cuda": "12.6",
+    "devices": [
+      {
+        "name": "NVIDIA H100 80GB HBM3",
+        "memory_gib": 79.1806640625
+      },
+      {
+        "name": "NVIDIA H100 80GB HBM3",
+        "memory_gib": 79.1806640625
+      }
+    ]
+  },
+  "lightning": "2.6.6",
+  "cuda_ddp_pytest": {
+    "passed": 1,
+    "skipped": 0,
+    "deselected": 2
+  },
+  "full_base": {
+    "ok": true,
+    "cuda_ddp_correctness": true,
+    "full_base_batch_32": true,
+    "reports": [
+      {
+        "rank": 0,
+        "steps": 3,
+        "ema_updates": 3,
+        "batch_per_gpu": 32,
+        "global_batch": 64,
+        "samples_per_recording": 145440,
+        "input": "generated waveforms, AudioSet preset shape; no downloaded AudioSet",
+        "timings": [
+          {
+            "step": 1,
+            "seconds": 1.6570829029660672,
+            "allocated_peak_gib": 28.2180233001709,
+            "reserved_peak_gib": 33.3125
+          },
+          {
+            "step": 2,
+            "seconds": 0.9022198540042154,
+            "allocated_peak_gib": 29.400696277618408,
+            "reserved_peak_gib": 33.34375
+          },
+          {
+            "step": 3,
+            "seconds": 0.6616752679692581,
+            "allocated_peak_gib": 29.4045352935791,
+            "reserved_peak_gib": 33.34375
+          }
+        ]
+      },
+      {
+        "rank": 1,
+        "steps": 3,
+        "ema_updates": 3,
+        "batch_per_gpu": 32,
+        "global_batch": 64,
+        "samples_per_recording": 145440,
+        "input": "generated waveforms, AudioSet preset shape; no downloaded AudioSet",
+        "timings": [
+          {
+            "step": 1,
+            "seconds": 1.6589598979917355,
+            "allocated_peak_gib": 28.2180233001709,
+            "reserved_peak_gib": 33.3125
+          },
+          {
+            "step": 2,
+            "seconds": 0.9049750590347685,
+            "allocated_peak_gib": 29.400696277618408,
+            "reserved_peak_gib": 33.34375
+          },
+          {
+            "step": 3,
+            "seconds": 0.6628553899936378,
+            "allocated_peak_gib": 29.4045352935791,
+            "reserved_peak_gib": 33.34375
+          }
+        ]
+      }
+    ]
+  },
+  "limitations": [
+    "Generated waveforms; no AudioSet corpus or pretrained weights downloaded.",
+    "Three optimizer updates with a short probe schedule; no sustained throughput, convergence, validation-cost, or full-training duration claim.",
+    "Step times exclude dataset loading and include different warmup effects; peak allocated/reserved memory comes from the PyTorch CUDA allocator."
+  ]
+}

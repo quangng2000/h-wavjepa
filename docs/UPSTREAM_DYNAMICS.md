@@ -183,7 +183,10 @@ Execution supports one-device FP32 and DDP with FP32 or BF16 mixed precision.
 Gradient checkpointing retains attention padding masks and has forward/gradient
 parity checks. Regularizer statistics and masked MSE accumulation remain FP32.
 Compilation remains disabled. CPU tests cover distributed gradients and the
-training integration; H100 memory capacity and throughput remain unmeasured.
+training integration. A two-H100 CUDA BF16 train/resume test and three full-model
+generated-audio updates passed; the full model used approximately 29.4 GiB peak
+allocated memory per GPU at 32 examples per rank. These checks do not establish
+sustained real-data throughput or training quality; see [validation](VALIDATION.md).
 The [two-H100 preset](AUDIOSET.md#two-h100s) requests 32 examples per rank,
 gradient checkpointing, and a 64-example global regularizer population.
 The presets reuse Transformers' cosine-with-warmup scheduler and WavJEPA's linear
@@ -212,8 +215,9 @@ LocaLeReg and SIGReg gather the training population across DDP ranks using an
 autograd-aware collective; gradient accumulation does not enlarge a call's
 population. The AudioSet two-GPU preset uses 32 examples per rank and drops
 incomplete training batches, maintaining 64 distinct manifest entries per call.
-This is a configuration, not proof of sufficient local neighborhoods or GPU fit;
-monitor retained-cluster and fallback diagnostics. Older long-recording presets
+That batch fit the two-H100 generated-audio smoke run, but does not establish
+sufficient local neighborhoods or sustained real-data behavior; monitor
+retained-cluster and fallback diagnostics. Older long-recording presets
 merge singleton tails into the preceding batch.
 
 The WAV datamodule owns rank sharding and requires
