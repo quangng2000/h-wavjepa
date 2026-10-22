@@ -32,7 +32,7 @@ subsamples **before** each upper MLP. The same positions are used for forecastin
 and regularization. Each upper state consumes one lower state, not an average of
 adjacent states.
 
-Our completed-audio-window mean readout, five-window shared history, single
+Our normalized top-layer mean readout, five-window shared history, single
 forecast origin, action-free predictors, and EMA upper targets are **audio
 adaptation choices**, not H-JEPA's published recipe. Its action aggregation has
 no counterpart in these action-free recordings. The mean readout pools WavJEPA
@@ -49,11 +49,21 @@ PyTorch Transformer forecasting head; upper-level losses update both MLPs and
 the shared encoder. A `hierarchy=false` control replaces the MLPs with identity
 maps while keeping the same predictor architecture, horizons, and temporal strides.
 
-For completed window index `t`, low states are mean readouts of contextual
-WavJEPA tokens, medium states are `G2(low)`, and high states are `G3(medium)`.
-This mean readout is an explicit design choice that can discard within-window
-details; it is not evidence of learned semantic abstraction. The original
-masked objective still trains the finer token-level features.
+For completed window index `t`, the student and teacher independently apply
+the same WavJEPA readout transformation: instance-normalize each of their last
+eight Transformer layers, average those layers, and mean-pool the resulting
+tokens. Medium states are `G2(low)` and high states are `G3(medium)`. This fixes
+the earlier mismatch between final-layer student means and normalized top-layer
+teacher means. Both EMA upper maps now receive the same kind of inputs as their
+online counterparts, while the original masked predictor retains its own
+student-to-teacher mapping.
+
+New presets select `model.readout_mode=normalized_top_k`. Old checkpoints without
+this field retain their `legacy` readout behavior; changing readout semantics on
+resume is rejected. Mean pooling can discard within-window details and is not
+evidence of learned semantic abstraction. The original masked objective still
+trains finer token-level features. Temporal aggregation over multiple completed
+windows remains a separate experiment; the pointwise baseline is preserved.
 
 The default history contains five consecutive windows. Every predictor's origin
 is window 4 (zero-based), and the target indices are 5, 6, and 8:
@@ -83,8 +93,11 @@ limits of the accompanying Lean centering proof.
 Future targets use WavJEPA's existing EMA context Transformer and EMA copies of
 G2/G3, with stop-gradient targets. The frontend/norm/mapper remain shared and
 detached on the target path, as in upstream WavJEPA. Teacher top-layer averaging
-and normalization are retained. EMA updates only after successful optimizer
-steps. This is **not** H-JEPA's no-EMA, action-conditioned training recipe.
+and normalization are retained. The original masked branch already encodes all
+nine teacher windows; its detached token targets are reused for forecasting,
+removing the previous duplicate nine-window teacher pass. The online forecasting
+prefix remains separate from the masked online branch. EMA updates only after
+successful optimizer steps. This is **not** H-JEPA's no-EMA, action-conditioned training recipe.
 
 ## Chronology and causality
 
@@ -103,9 +116,14 @@ frontend has a computed stride of 160 samples (10 ms) and receptive field of
 240 samples (15 ms), before its full-window contextual Transformer.
 History is 10.05 seconds; target window endpoints are 2.01, 4.02 and 8.04 seconds
 beyond the history endpoint. Total required recording length is **18.09 seconds**.
-A nominal 10-second AudioSet clip is too short for this preset. Short WAVs are
-rejected, never zero-padded. This route is not token-by-token streaming; all
-features of a bidirectional window become available only when that window ends.
+A nominal 10-second AudioSet clip is too short for this long-recording preset.
+The `audioset` family instead uses 16,160-sample windows (1.01 seconds,
+100 tokens): 9.09 seconds total, 5.05 seconds observed, and target window endpoints
+1.01/2.02/4.04 seconds beyond the history endpoint. Both families reject short
+segments rather than padding them. This route is not token-by-token streaming;
+all features of a bidirectional window become available only when that window
+ends. See the [AudioSet guide](AUDIOSET.md) for data preparation, two-H100 launch,
+preflight, and resume.
 
 ## Run
 
@@ -129,8 +147,11 @@ The `upstream_hierarchical` preset initializes **randomly**. Choose
 backbone from the official Hugging Face base release. Only the new abstractions
 and future predictors start fresh. The loader pins revision
 `6be4a5093f6c9adbbd55e00b6e5b8f067aa03345`, verifies the complete safetensors
-SHA-256, removes the explicit `model.` prefix, and requires exact tensor names,
-shapes and dtypes. It does not execute Hub Python or its configuration expressions.
+SHA-256 and removes the explicit `model.` prefix. Learned tensor names, shapes,
+and dtypes must match exactly. When adapting the released 200-token model to the
+AudioSet preset's 100 tokens, only the two fixed sinusoidal positional arrays
+are regenerated after verifying the original canonical arrays; learned tensors
+are not resized. It does not execute Hub Python or configuration expressions.
 
 ```bash
 # Optional: cache the ~785 MB file before training; prints its local path.
@@ -153,15 +174,20 @@ separate hash-verified original source checkout; see [validation](VALIDATION.md)
 
 Use `upstream_flat` and `upstream_baseline` with the same data/budget overrides.
 The baseline disables future losses and distribution regularization. It retains our chronological
-window sampling, FP32 execution and optimizer settings; it is an **adaptation
+window sampling and optimizer settings; it is an **adaptation
 control**, not a reproduction of the published 375k-step training run. The flat
 control removes G2/G3 parameters, so it is not exactly parameter-matched; report
 the parameter/compute difference and tune a capacity-matched control for claims.
 
-Initial support is single-device FP32. CPU is tested; CUDA performance is not
-validated. DDP, mixed precision, gradient checkpointing, and compilation are
-rejected. The presets reuse Transformers' cosine-with-warmup scheduler and
-WavJEPA's linear EMA annealing, controlled by the outer Lightning module:
+Execution supports one-device FP32 and DDP with FP32 or BF16 mixed precision.
+Gradient checkpointing retains attention padding masks and has forward/gradient
+parity checks. Regularizer statistics and masked MSE accumulation remain FP32.
+Compilation remains disabled. CPU tests cover distributed gradients and the
+training integration; H100 memory capacity and throughput remain unmeasured.
+The [two-H100 preset](AUDIOSET.md#two-h100s) requests 32 examples per rank,
+gradient checkpointing, and a 64-example global regularizer population.
+The presets reuse Transformers' cosine-with-warmup scheduler and WavJEPA's linear
+EMA annealing, controlled by the outer Lightning module:
 
 ```yaml
 model:
@@ -173,19 +199,30 @@ model:
   ema_anneal_end_step: null  # same resolved budget
 ```
 
-These budget-scaled defaults are an adaptation, not the original paper's
-100k-step warmup/EMA horizon. Set explicit values for a planned research run.
+These budget-scaled defaults belong to the long-recording presets. The AudioSet
+presets explicitly set a 375,000-step budget and 100,000-step warmup/EMA horizon.
+Even with those matching step counts, the chronological 1.01-second window
+recipe differs from the original eight random two-second crops.
 The resolved schedule is checkpointed; resuming preserves its budget, including
 with gradient accumulation. Continuing beyond a completed cosine budget is
 rejected. Choose the full `lr_total_steps` before an interrupted/partial run.
 Older checkpoints without schedule fields retain constant LR/EMA semantics.
 
-Both regularizers require at least two recordings per batch; the real-data presets enforce this, merging a
-singleton final batch into the preceding batch without dropping held-out records.
-Each split must contain at least two recordings. LocaLeReg needs larger batches
-for retained local neighborhoods: real-data presets request 32 and log global
-fallback frequency. Fixed batch layout is required for repeatable regularization
-evaluation; changed batches alter the statistic and, for LocaLeReg, the clusters.
+LocaLeReg and SIGReg gather the training population across DDP ranks using an
+autograd-aware collective; gradient accumulation does not enlarge a call's
+population. The AudioSet two-GPU preset uses 32 examples per rank and drops
+incomplete training batches, maintaining 64 distinct manifest entries per call.
+This is a configuration, not proof of sufficient local neighborhoods or GPU fit;
+monitor retained-cluster and fallback diagnostics. Older long-recording presets
+merge singleton tails into the preceding batch.
+
+The WAV datamodule owns rank sharding and requires
+`trainer.use_distributed_sampler=false` with DDP. Epoch-aware crops are
+reproducible across worker scheduling; validation/test always use fixed segment
+offsets. Each split must meet its per-rank minimum. Multi-device held-out loaders
+may repeat tail entries, and regularizer evaluation uses local rank populations.
+Use one device for final once-per-entry evaluation and preserve the batch layout
+when comparing regularizer statistics. See [manifest rules](AUDIOSET.md#data-and-manifests).
 
 Resume/evaluate with the same model and data configuration:
 
@@ -222,8 +259,8 @@ with torch.no_grad():
 `subsample=True` for the hierarchy's actual temporal grids; `encode_targets`
 supports the same option for EMA states. Training returns these subsampled online
 states in `compute_loss(...)["levels"]`. Future targets are selected by their
-original window indices from dense teacher states, which is equivalent to
-pointwise encoding only the selected timestamps.
+original window indices from the masked branch's cached teacher states, which
+is equivalent to pointwise encoding only the selected timestamps.
 
 Predictions are latent vectors, not synthesized audio. Current training uses one
 origin per excerpt; it does not establish stable recursive rollouts or planning.

@@ -73,8 +73,11 @@ Every level has the backbone's feature width. Dense upper-level readouts apply
 the learned pointwise maps to every window; they do not upsample sparse states.
 This evaluation grid differs from the default training state strides `[1, 2, 4]`;
 both are recorded in the export manifest.
-The default 32,160-sample window spans 2.01 seconds at 16 kHz. Its window-level
-features are too coarse for precise event timing. Use `backbone` for that
+Window geometry and the low-state readout come from the checkpoint. The original
+32,160-sample window spans 2.01 seconds at 16 kHz; AudioSet checkpoints use
+16,160 samples, or 1.01 seconds. New checkpoints use normalized top-k low states;
+older checkpoints preserve their original final-layer readout. Both window-level
+grids are too coarse for precise event timing. Use `backbone` for that
 comparison: timestamps come from the configured convolution geometry, and
 slightly overlapping context windows maintain a continuous token grid. With the
 default frontend the token hop is 10 ms. This is a token location, **not** a

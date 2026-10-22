@@ -6,9 +6,11 @@ The actual core from [labhamlet/wavjepa](https://github.com/labhamlet/wavjepa),
 commit `6f4e1b1f18316c50768c8523f325ccffeaa6985b`, is retained in
 `src/vendor/wavjepa`. See its [source/diff record](src/vendor/wavjepa/UPSTREAM.json),
 [notices](src/vendor/wavjepa/NOTICE.md), [BSD license](src/vendor/wavjepa/LICENSE),
-and [inherited AudioMAE license](src/vendor/wavjepa/LICENSE-AudioMAE).
-The positional utilities carry Meta copyright and AudioMAE attribution;
-AudioMAE's license is CC-BY-NC-4.0. Commercial clearance is not claimed.
+and [historical AudioMAE license](src/vendor/wavjepa/LICENSE-AudioMAE).
+The copied AudioMAE positional utilities have been removed from active code and
+replaced with an independent implementation of the sinusoidal formula. The
+original source hash and license remain for historical provenance; no broader
+commercial-rights claim is made for pretrained weights or dependencies.
 Unrelated upstream denoising, data-loading and evaluation vendor packages are
 not imported. Source reuse does not imply upstream endorsement or reproduced results.
 
@@ -17,7 +19,10 @@ not imported. Source reuse does not imply upstream endorsement or reproduced res
 `src/objectives/sigreg.py` adapts SIGReg from `h_jepa/loss.py` in
 [kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA), commit
 `97054ecaff83e13839195ec4b92d74c08a0127c5`. The single-device formula is retained;
-validation is added and the unvalidated distributed reduction is excluded.
+validation and an autograd-aware global-population DDP adapter are added.
+The original upstream distributed reduction is not used. CPU multi-process tests
+compare the adapter's loss and parameter gradients with one concatenated batch;
+statistics remain FP32 during BF16 mixed-precision training.
 The [MIT license and author notice](third_party/licenses/H-JEPA.txt) are retained.
 Default projection count is configurable and differs from the paper's recipe.
 The unmodified `tests/fixtures/h_jepa/loss.py` at the same revision is retained

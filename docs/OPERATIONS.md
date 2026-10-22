@@ -1,8 +1,9 @@
 # Operational contract
 
 Model-specific examples below describe the legacy prototype. The upstream-backed
-model has a separate checkpoint schema, single-device FP32 limits and inference
-API; see [Upstream dynamics](UPSTREAM_DYNAMICS.md).
+model has a separate checkpoint schema and inference API, with single-device or
+externally launched DDP in FP32 or BF16 mixed precision; see
+[Upstream dynamics](UPSTREAM_DYNAMICS.md) and the [AudioSet guide](AUDIOSET.md).
 
 This is an executable research training/evaluation/extraction workflow. Production readiness still requires workload-specific acceptance tests for deployed reliability, resources and audio representation quality.
 
@@ -47,7 +48,7 @@ Tests cover CPU model/data contracts, generated signals in real WAV containers t
 
 On 20 October 2026, a one-training-batch/one-validation-batch smoke run also passed on this machine's Apple MPS GPU with strict deterministic algorithms, Python 3.12.13, PyTorch 2.14.1 and Lightning 2.6.6. Best/last checkpoints and a completed step-1 run record were verified. The masked mean uses a dense reduction with tested equivalent gradients, avoiding MPS's unsupported deterministic scatter-add backward. This small check is not long-run, mixed-precision, resume or multi-device validation.
 
-Spawn/fork/notebook distributed strategies are explicitly rejected: a two-process CPU diagnostic found Lightning's parent Trainer retains stale step/checkpoint metadata after workers exit. Single-device execution is the supported tested path. Externally launched DDP and accelerator/precision configs still require independent validation; inherited presets are not certification.
+Spawn/fork/notebook distributed strategies are explicitly rejected: a two-process CPU diagnostic found Lightning's parent Trainer retains stale step/checkpoint metadata after workers exit. The upstream dynamics route now has two-process `torchrun` tests in CPU FP32 and BF16, including gradient checkpointing, real WAV loading, accumulation and resume. The two-H100 preset uses this external-launch contract with NCCL; actual CUDA hardware validation is tracked in the [validation record](VALIDATION.md). Distributed validation can repeat tail examples to balance ranks; use one device for exact evaluation.
 
 Before a production deployment:
 

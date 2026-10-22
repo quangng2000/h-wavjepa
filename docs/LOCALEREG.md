@@ -27,10 +27,12 @@ audio experiment, not a reproduction of the full LocaLeJEPA recipe.
 
 ## Audio adaptation
 
-At level `l` and observed time `t`, the population consists of **one state from
-each recording in the minibatch**. The adapter calls the authors' loss on shape
-`[1, batch, width]`, independently for every time and level, then averages over
-time. It does not treat different times as image-style augmented views or merge
+At level `l` and observed time `t`, the training population consists of **one
+state from each example across all DDP ranks**. An autograd-aware all-gather
+collects equal local batches; every rank evaluates the same loss and DDP's
+parameter-gradient averaging gives the global-population gradient. The adapter
+calls the authors' loss on shape `[1, global_batch, width]`, independently for
+every time and level, then averages over time. It does not treat different times as image-style augmented views or merge
 them into a larger batch. Clustering uses detached states; gradients flow through
 the centered original states into all online layers that produced them.
 
@@ -58,7 +60,7 @@ does not guarantee that neighborhoods correspond to speakers or sound classes.
 | `localereg_n_quad` | 256 | Higher than upstream's 64 to resolve width 768. |
 | Frequency knots/range | 17 / `[0,3]` | Upstream defaults. |
 | `regularization_weight` | 0.1 | Initial experiment setting, not a tuned optimum. |
-| Real-data batch size | 32 | GPU memory and throughput unmeasured. |
+| AudioSet H100 population | 32/rank × 2 ranks = 64 | Actual per-call training population; GPU memory and throughput unmeasured. |
 
 At width 768, 64 quadrature nodes give a maximum characteristic-function error
 over 0.2 on the 17-point grid against an independent float64 512-node calculation.
@@ -73,10 +75,25 @@ and optimizer settings on validation data under comparable tuning budgets.
 
 ## Batches, diagnostics, and comparisons
 
-Real-data presets request 32 recordings per batch. Reduce this only after
-checking the retained neighborhoods. Gradient accumulation does not enlarge the
-population used by a single regularizer call. The minimum accepted batch is two;
-this permits smoke runs and small tails, but does not ensure local behavior.
+One-device real-data presets request 32 examples per batch. The two-H100 AudioSet
+preset gathers 32 per rank into a global population of 64 and drops incomplete
+training batches to keep that population fixed. Changing the per-rank batch
+changes the statistic and possibly the retained neighborhoods. **Gradient
+accumulation does not enlarge the population used by a single regularizer call.**
+The minimum two-example smoke configuration exercises the global fallback and
+does not demonstrate local behavior.
+
+BF16 states are gathered/cast with gradient tracking, then the statistic runs in
+FP32 with autocast disabled. Random projections and cluster initialization use
+synchronized, reproducible seeds. No additional world-size loss divisor is needed.
+Two-process CPU tests compare losses and DDP gradients against a concatenated
+single-process reference; target-GPU validation remains pending.
+
+Validation/test statistics use local populations without all-gather, and
+multi-device held-out sampling can repeat tail entries. Training and validation
+regularizer values therefore need not have the same scale or neighborhoods.
+For final evaluation, use one device and keep the batch size/order fixed.
+See the [AudioSet guide](AUDIOSET.md) for exact sampling and launch settings.
 
 For each zero-indexed level, Lightning logs `localereg_configured_clusters`,
 `localereg_effective_clusters`, `localereg_kept_fraction`, and `localereg_fallback`
@@ -95,8 +112,10 @@ with the existing HEAR route; lower pretraining loss alone is not a downstream w
 Checkpoints record the regularizer kind, settings, and source revision. An old
 checkpoint without these fields retains SIGReg semantics. Resume rejects a
 changed regularizer, cluster setting, quadrature setting, or source revision.
-Select `model.regularizer_kind=sigreg` when resuming an older run. CPU/CUDA FP32
-single-device execution is supported by the adapter; only CPU has been tested.
+Select `model.regularizer_kind=sigreg` when resuming an older run. New presets
+also select matched student/teacher normalized top-layer readouts; old checkpoints
+retain their previous readout semantics. Runtime support includes CPU/CUDA FP32
+and BF16 mixed precision with DDP; hardware performance has not been measured.
 
 ## What Lean establishes
 
