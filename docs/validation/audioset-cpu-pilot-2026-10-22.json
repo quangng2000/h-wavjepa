@@ -1,0 +1,164 @@
+{
+  "date": "2026-10-22",
+  "status": "pilot_only",
+  "hardware": "CPU-only: 2 reserved cores, 8 GiB RAM",
+  "python": "3.12.15",
+  "ffmpeg": "5.1.9-0+deb12u1",
+  "initial_conversion_script_sha256": "6520ceb5e5eae42fe1db191187e2495912423215d60113785b11a2c3ad0b56d2",
+  "final_validation_script_sha256": "fa0d68809ae05b0aed1edd783c396892558da678d0b4ebe1c6bbc66013fb8a5b",
+  "preparation_tests": {
+    "passed": 28,
+    "skipped": 0
+  },
+  "source_archive_bytes_streamed": 8406753280,
+  "preparation": {
+    "metadata": {
+      "files": [
+        {
+          "local_path": "metadata/balanced_train_segments.csv",
+          "path": "data/balanced_train_segments.csv",
+          "sha256": "3b83e5ff9ed72cfda37d4e36ce08250e107c1ea70f109f6ab6668ac200db5e94",
+          "size": 1211931,
+          "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/balanced_train_segments.csv"
+        },
+        {
+          "local_path": "metadata/eval_segments.csv",
+          "path": "data/eval_segments.csv",
+          "sha256": "f7055f53935f70e74e39494a5c8c4c78f1700fce275028bd36e31186f33d45db",
+          "size": 1143389,
+          "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/eval_segments.csv"
+        },
+        {
+          "local_path": "metadata/unbalanced_train_segments.csv",
+          "path": "data/unbalanced_train_segments.csv",
+          "sha256": "bb2dfd5e4f1ced39db9480633c510f813d7899f4b7472aa83a411b4a43a12698",
+          "size": 101468408,
+          "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/unbalanced_train_segments.csv"
+        }
+      ],
+      "revision": "5a2fa42a1506470d275a47ff8e1fdac5b364e6ef"
+    },
+    "provenance_sha256": "46ae0f1172b2c3ebaa41b31dab29f58213ed4f22d99208de117ba60db6ac108f",
+    "rejections": {
+      "bal_train00": 1,
+      "unbal_train000": 47
+    },
+    "rejections_sha256": "225d23685801976338da034f763a44d64b23e8bdeca0a9070cd34c1afd8dc24e",
+    "revision": "5a2fa42a1506470d275a47ff8e1fdac5b364e6ef",
+    "runtime": {
+      "ffmpeg_executable": "/usr/bin/ffmpeg",
+      "ffmpeg_version": "ffmpeg version 5.1.9-0+deb12u1 Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc 12 (Debian 12.2.0-14+deb12u1)\nconfiguration: --prefix=/usr --extra-version=0+deb12u1 --toolchain=hardened --libdir=/usr/lib/x86_64-linux-gnu --incdir=/usr/include/x86_64-linux-gnu --arch=amd64 --enable-gpl --disable-stripping --enable-gnutls --enable-ladspa --enable-libaom --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libflite --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libglslang --enable-libgme --enable-libgsm --enable-libjack --enable-libmp3lame --enable-libmysofa --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libpulse --enable-librabbitmq --enable-librist --enable-librubberband --enable-libshine --enable-libsnappy --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --enable-libsvtav1 --enable-libtheora --enable-libtwolame --enable-libvidstab --enable-libvorbis --enable-libvpx --enable-libwebp --enable-libx265 --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi --enable-lv2 --enable-omx --enable-openal --enable-opencl --enable-opengl --enable-sdl2 --disable-sndio --enable-libjxl --enable-pocketsphinx --enable-librsvg --enable-libmfx --enable-libdc1394 --enable-libdrm --enable-libiec61883 --enable-chromaprint --enable-frei0r --enable-libx264 --enable-libplacebo --enable-librav1e --enable-shared\nlibavutil      57. 28.100 / 57. 28.100\nlibavcodec     59. 37.100 / 59. 37.100\nlibavformat    59. 27.100 / 59. 27.100\nlibavdevice    59.  7.100 / 59.  7.100\nlibavfilter     8. 44.100 /  8. 44.100\nlibswscale      6.  7.100 /  6.  7.100\nlibswresample   4.  7.100 /  4.  7.100\nlibpostproc    56.  6.100 / 56.  6.100\n",
+      "preparation_script_sha256": "da2de8d0c114777f8a83bf65dccde8c81d8d4e44aa23414c64e812a6329365ca"
+    },
+    "sources": [
+      {
+        "archive_directory": "bal_train",
+        "error": null,
+        "name": "bal_train00",
+        "sha256": "b35c094f83ac10b6cdf27a59f929278ae2d39d66cebe3d1dd5e58e50655cdb06",
+        "size": 2802626560,
+        "split": "val",
+        "status": "partial",
+        "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/bal_train00.tar",
+        "verified_sha256": "b35c094f83ac10b6cdf27a59f929278ae2d39d66cebe3d1dd5e58e50655cdb06"
+      },
+      {
+        "archive_directory": "eval",
+        "error": null,
+        "name": "eval00",
+        "sha256": "5e302c7746068b19ec68b1086bd4987a330975f5bbbf11b77b1c60b8f25d88d5",
+        "size": 2782668800,
+        "split": "test",
+        "status": "partial",
+        "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/eval00.tar",
+        "verified_sha256": "5e302c7746068b19ec68b1086bd4987a330975f5bbbf11b77b1c60b8f25d88d5"
+      },
+      {
+        "archive_directory": "unbal_train",
+        "error": null,
+        "name": "unbal_train000",
+        "sha256": "4ccdf9bb6cb8b2b5b2ea2e7c134fc6ec22fa36c6bb261f74464c91ceb49991d2",
+        "size": 2821457920,
+        "split": "train",
+        "status": "complete",
+        "url": "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/5a2fa42a1506470d275a47ff8e1fdac5b364e6ef/data/unbal_train000.tar",
+        "verified_sha256": "4ccdf9bb6cb8b2b5b2ea2e7c134fc6ec22fa36c6bb261f74464c91ceb49991d2"
+      }
+    ],
+    "splits": {
+      "test": {
+        "bytes": 20448990,
+        "clips": 64,
+        "manifest_sha256": "a9f197964dd814d023761905004d53d3c003b55075a0d6dd601626f62c220d98",
+        "samples": 10221999
+      },
+      "train": {
+        "bytes": 623010500,
+        "clips": 1953,
+        "manifest_sha256": "745f71d03dd970df378a30c7e5c96150f18881a035c7f25180af82ae3d9f198c",
+        "samples": 311429083
+      },
+      "val": {
+        "bytes": 20126616,
+        "clips": 63,
+        "manifest_sha256": "a3b766f5c822eb5dcca37c3b4efbc6d27b5b8476f90a32e94a1c4e9c1b76d4b8",
+        "samples": 10060851
+      }
+    }
+  },
+  "training_preflight": {
+    "valid": true,
+    "sample_rate": 16000,
+    "num_samples": 145440,
+    "require_full_length": true,
+    "batch_size": 32,
+    "minimum_batch_size": 2,
+    "world_size": 2,
+    "train_drop_last": true,
+    "splits": {
+      "train": {
+        "files": 1953,
+        "source_frames": 311429083,
+        "cropped_files": 1953,
+        "padded_files": 0
+      },
+      "val": {
+        "files": 63,
+        "source_frames": 10060851,
+        "cropped_files": 63,
+        "padded_files": 0
+      },
+      "test": {
+        "files": 64,
+        "source_frames": 10221999,
+        "cropped_files": 64,
+        "padded_files": 0
+      }
+    },
+    "checks": {
+      "physical_files_disjoint": true,
+      "group_fields_disjoint": [
+        "recording_id"
+      ],
+      "pcm_headers_and_payload_extents": true,
+      "content_hashes": false
+    },
+    "limitations": [
+      "Distinct physical files may contain copied audio or overlapping crops.",
+      "Group guarantees depend on complete, correct user-provided identifiers.",
+      "Validation is a snapshot; keep manifests and audio immutable during training.",
+      "The files count is manifest entries; repeated physical files can define distinct segments.",
+      "Multi-device evaluation pads ranks; use one device for exact once-per-entry metrics."
+    ]
+  },
+  "storage_roundtrip": {
+    "verified": true,
+    "archive_bytes": 771368960,
+    "sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572"
+  },
+  "limitations": [
+    "One complete training shard, plus 64 conversion attempts each from one validation and one test shard. Not the complete AudioSet cohort.",
+    "The initial conversion preceded pipeline hardening and runtime metadata capture; all accepted outputs were rechecked with the final validator.",
+    "No GPU training or representation-quality evaluation was performed."
+  ]
+}

@@ -77,6 +77,23 @@ uv run --extra hear pytest
 uv run python -m src.train experiment=upstream_smoke
 ```
 
+## Real AudioSet CPU pilot
+
+The CPU-only preparation pilot converted 2,128 clips from the pinned WavJEPA
+AudioSet source: one complete training shard and 64 attempts each from one
+validation and test shard. It published 1,953 training, 63 validation and 64 test
+clips; 48 clips were rejected. All three source archives were SHA256-verified,
+all accepted WAV checksums were checked, and the experiment-aware two-H100
+manifest preflight passed with no padding and disjoint recording IDs.
+
+All 28 preparation tests passed on the CPU host, including real FFmpeg conversion.
+The 771,368,960-byte pilot archive was uploaded to private object storage and
+downloaded back with the same SHA256. This is a small validated dataset, not
+full-corpus completion or a GPU throughput measurement. The
+[machine-readable evidence](validation/audioset-cpu-pilot-2026-10-22.json)
+records the source hashes, counts, runtime and limitations. See the
+[preparation guide](PREPARE_AUDIOSET.md) for reproducible commands.
+
 ## Two-H100 smoke
 
 On 22 October 2026, commit `4a9b09a80b4e1fac2bb63a856606574a96e78e8f`

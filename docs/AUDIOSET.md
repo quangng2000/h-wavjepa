@@ -43,7 +43,8 @@ windows: 18.09 seconds total, 10.05 seconds observed, and target-end horizons
 
 ## Data and manifests
 
-Prepare/download the audio separately before launching GPUs. The loader does not
+Use the [CPU preparation command](PREPARE_AUDIOSET.md) and its
+[pinned source inventory](AUDIOSET_SOURCE.md) before launching GPUs. The loader does not
 download, resample, concatenate clips, or create splits. Paths are relative to
 the manifest's directory unless absolute:
 
