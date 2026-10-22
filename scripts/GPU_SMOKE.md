@@ -34,7 +34,7 @@ For Autoresearch, use one batch job with these **platform-enforced** bounds:
 Add the approved mission, a fresh idempotency key, and an allowlisted source
 context. Include only `.project-root`, `pyproject.toml`, `uv.lock`,
 `requirements.txt`, `src`, `configs`, `tests`, `scripts`, `third_party`,
-`LICENSE`, and `THIRD_PARTY_NOTICES.md`; omit `__pycache__` and `*.pyc`.
+and `THIRD_PARTY_NOTICES.md`; omit `__pycache__` and `*.pyc`.
 Never upload `.git`, `.venv`, `.env`, datasets, checkpoints, or existing logs.
 The Dockerfile pins the official runtime image digest and derives Python
 constraints from `uv.lock`, retaining the image's matched CUDA/Torch stack.

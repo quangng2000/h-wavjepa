@@ -12,6 +12,6 @@ COPY configs/ configs/
 COPY tests/ tests/
 COPY scripts/ scripts/
 COPY third_party/ third_party/
-COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY THIRD_PARTY_NOTICES.md ./
 ENV PYTHONPATH=/app OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false
 CMD ["python", "scripts/smoke_gpu.py", "--output", "/output/h-wavjepa-smoke"]

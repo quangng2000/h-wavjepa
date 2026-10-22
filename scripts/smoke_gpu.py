@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import lightning as L
@@ -137,6 +138,9 @@ def run(output: Path) -> None:
         check=True,
         timeout=180,
     )
+    cases = ET.parse(output / "ddp-correctness.xml").findall(".//testcase")
+    if len(cases) != 1 or cases[0].find("skipped") is not None:
+        raise RuntimeError("The CUDA DDP test must execute, not skip")
     subprocess.run(
         [
             sys.executable,
