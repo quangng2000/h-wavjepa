@@ -18,7 +18,7 @@ For Autoresearch, use one batch job with these **platform-enforced** bounds:
   "max_restarts": 0,
   "resume": "none",
   "queue_ttl_minutes": 60,
-  "dockerfile_path": "scripts/Dockerfile.gpu-smoke",
+  "dockerfile_path": "Dockerfile.gpu-smoke",
   "command": "python scripts/smoke_gpu.py --output /output/h-wavjepa-smoke",
   "checks": {
     "success": {
@@ -33,10 +33,21 @@ For Autoresearch, use one batch job with these **platform-enforced** bounds:
 
 Add the approved mission, a fresh idempotency key, and an allowlisted source
 context. Include only `.project-root`, `pyproject.toml`, `uv.lock`,
-`requirements.txt`, `src`, `configs`, `tests`, `scripts`, `third_party`,
+`requirements.txt`, `Dockerfile.gpu-smoke`, `src`, `configs`, `tests`, `scripts`, `third_party`,
 and `THIRD_PARTY_NOTICES.md`; omit `__pycache__` and `*.pyc`.
 Never upload `.git`, `.venv`, `.env`, datasets, checkpoints, or existing logs.
-The Dockerfile pins the official runtime image digest and derives Python
+For `create_context`, compress the tar with **zstd** before hashing/uploading:
+the service rejects plain tar, gzip, and xz. A tracked-files-only context can be
+prepared without copying local credentials or caches:
+
+```bash
+git archive --format=tar HEAD .project-root pyproject.toml uv.lock requirements.txt Dockerfile.gpu-smoke \
+  src configs tests scripts third_party THIRD_PARTY_NOTICES.md \
+  | zstd -o /tmp/h-wavjepa-smoke.tar.zst
+```
+
+The Dockerfile lives at the context root because this platform resolves build
+inputs relative to its directory. It pins the official runtime image digest and derives Python
 constraints from `uv.lock`, retaining the image's matched CUDA/Torch stack.
 
 On 2026-10-22, `validate_job` quotes **$1.26 maximum GPU runtime** for two H100s
