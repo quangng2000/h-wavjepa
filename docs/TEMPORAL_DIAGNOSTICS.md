@@ -38,8 +38,12 @@ between variance identifies a recording-constant risk. Low persistence error and
 no cost from disrupting context order provide further evidence, but these are
 diagnostics, not a learned semantic-quality score or a prevention mechanism.
 
-Variance is estimated **within each local validation batch** and then averaged
-over batches/ranks; the between term is not whole-corpus variance. The context
+Aligned Lightning evaluation estimates variance **within each global validation
+batch**, gathering latent states across ranks before computing nonlinear ratios.
+`val/diagnostic_recordings` records the population size. Standalone evaluation
+uses its supplied population; older distributed reports used local batches and
+are not directly comparable. Averages over batches are not whole-corpus variance.
+Keep global batch size and sample grouping/order fixed for comparisons. The context
 grids have different supports, overlap and valid counts, so compare a level
 against matched controls, not absolute values across grids. Variance diagnostics
 now use dense valid states for both model versions; older pointwise reports used

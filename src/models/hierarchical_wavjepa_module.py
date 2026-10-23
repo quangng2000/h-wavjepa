@@ -25,6 +25,7 @@ from transformers import get_cosine_schedule_with_warmup
 
 from src.models.components.temporal_predictor import TemporalPredictor
 from src.models.components.wavjepa_backbone import WavJEPABackbone
+from src.objectives.distributed import prepare_population
 from src.objectives.localereg import SOURCE_COMMIT as LOCALEREG_COMMIT
 from src.objectives.localereg import LocaLeReg
 from src.objectives.sigreg import SOURCE_COMMIT as SIGREG_COMMIT
@@ -513,12 +514,20 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         *,
         diagnostics: bool = False,
         masked_crops: Tensor | None = None,
+        synchronized_evaluation: bool = False,
     ) -> dict[str, Any]:
+        # Only aligned Lightning validation/test loaders opt into collectives.
+        # Standalone inference/evaluation may run on one rank and stays local.
+        if type(synchronized_evaluation) is not bool or (synchronized_evaluation and self.training):
+            raise ValueError("Synchronized evaluation requires an eval-mode model")
         distributed_training = (
             self.training
             and torch.is_grad_enabled()
             and dist.is_available()
             and dist.is_initialized()
+        )
+        distributed_objective = distributed_training or (
+            synchronized_evaluation and dist.is_available() and dist.is_initialized()
         )
         channels = self.backbone.config.get("input_channels", 1)
         forecasting = bool(
@@ -551,9 +560,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             valid &= torch.isfinite(masked_crops).all() if valid_crops else False
         elif masked_crops is not None:
             valid &= False
-        if distributed_training:
+        if distributed_objective:
             if not all_ranks_true(valid):
-                raise ValueError("invalid waveform or masked crops on at least one training rank")
+                stage = "training" if distributed_training else "evaluation"
+                raise ValueError(f"invalid waveform or masked crops on at least one {stage} rank")
         elif not bool(valid):
             raise ValueError("Invalid waveform shape, finite float32 samples or masked crop recipe")
         windows = (
@@ -697,7 +707,8 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                         reg_terms.append(
                             self.regularizer(
                                 level.transpose(0, 1),
-                                global_batch=self.training and torch.is_grad_enabled(),
+                                global_batch=(self.training and torch.is_grad_enabled())
+                                or synchronized_evaluation,
                                 seed=regularizer_seed,
                             )
                         )
@@ -728,7 +739,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             loss = loss + self.temporal_variance_weight * temporal_variance_loss
         if not all_ranks_true(
             torch.isfinite(torch.stack([loss, masked, *terms, *reg_terms, *temporal_terms])).all(),
-            synchronize=distributed_training,
+            synchronize=distributed_objective,
         ):
             raise FloatingPointError("non-finite upstream WavJEPA dynamics loss")
         return {
@@ -780,13 +791,38 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                 stats[index].update(forecast_diagnostics(prediction, target, origin, shifted))
         return stats
 
+    @torch.no_grad()
+    def evaluation_population(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Global diagnostic populations for aligned distributed evaluation only.
+
+        The small latent tensors are gathered, never the audio or training graph.
+        Nonlinear variances/ratios are then evaluated on the same recording count
+        when a fixed global batch is partitioned across four or eight devices.
+        """
+        population = dict(result)
+        for name in ("levels", "dense_levels", "predictions", "targets", "teacher_origins"):
+            population[name] = []
+            for values in result[name]:
+                states = values.unsqueeze(1) if values.ndim == 2 else values
+                gathered, _ = prepare_population(
+                    states.detach().transpose(0, 1),
+                    global_batch=True,
+                    seed=None,
+                    name="Evaluation diagnostics",
+                )
+                gathered = gathered.transpose(0, 1)
+                population[name].append(gathered[:, 0] if values.ndim == 2 else gathered)
+        return population
+
     def _shared_step(self, batch: dict[str, Tensor], stage: str, batch_idx: int) -> Tensor:
         seed = None if stage == "train" else (self.eval_seed + batch_idx) % 2**32
+        synchronized_evaluation = stage != "train" and dist.is_available() and dist.is_initialized()
         result = self.compute_loss(
             batch["waveform"],
             seed=seed,
             diagnostics=stage != "train",
             masked_crops=batch.get("masked_crops"),
+            synchronized_evaluation=synchronized_evaluation,
         )
         if (
             stage == "train"
@@ -825,12 +861,22 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         for i, stats in enumerate(result["regularization_stats"]):
             for name, value in stats.items():
                 self.log(f"{stage}/level_{i}/localereg_{name}", value, **kwargs)
-        for i, level in enumerate(result["levels"]):
+        diagnostic_result = (
+            self.evaluation_population(result) if synchronized_evaluation else result
+        )
+        if stage != "train":
+            population_size = (
+                len(diagnostic_result["levels"][0])
+                if diagnostic_result["levels"]
+                else len(batch["waveform"])
+            )
+            self.log(f"{stage}/diagnostic_recordings", float(population_size), **kwargs)
+        for i, level in enumerate(diagnostic_result["levels"]):
             self.log(
                 f"{stage}/level_{i}/batch_std", level.std(dim=0, unbiased=False).mean(), **kwargs
             )
         if stage != "train":
-            for i, stats in enumerate(self.temporal_diagnostics(result)):
+            for i, stats in enumerate(self.temporal_diagnostics(diagnostic_result)):
                 for name, value in stats.items():
                     self.log(f"{stage}/level_{i}/{name}", value, **kwargs)
         return result["loss"]

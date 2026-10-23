@@ -275,6 +275,27 @@ class _ShardCache:
             oldest.unlink()
         if shutil.disk_usage(self.directory).free < shard["bytes"] + self.minimum_free:
             raise OSError("Insufficient disk space for the next verified audio shard")
+        from scripts.checkpoint_transfer import download_verified_object, managed_download_client
+
+        if managed_download_client(self.client):
+            # A real SDK transfer owns threads, so its hard deadline is enforced
+            # by a separate process instead of interrupting an SDK thread join.
+            try:
+                download_verified_object(
+                    self.client,
+                    self.bucket,
+                    shard["key"],
+                    path,
+                    size=shard["bytes"],
+                    sha256=shard["sha256"],
+                    timeout_seconds=self.download_timeout_seconds,
+                    credential_scope="audio",
+                )
+            except TimeoutError:
+                raise ShardDownloadTimeout("Audio shard read exceeded its total deadline") from None
+            return path
+        # Injected in-memory stores retain the synchronous contract used by
+        # integrity/deadline tests. Production botocore clients never fall back.
         temporary = path.with_suffix(".partial")
         temporary.unlink(missing_ok=True)
         from botocore.exceptions import (

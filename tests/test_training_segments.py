@@ -1,5 +1,6 @@
 """Bounded segment configuration, verified S3 handoffs and real Lightning resume."""
 
+import errno
 import io
 import json
 import subprocess
@@ -37,6 +38,7 @@ from scripts.train_segment import (
     validate_launch_options,
     verify_resume_state,
     verify_streaming_report,
+    wait_owned_processes,
 )
 from src.utils.runtime import validate_config
 
@@ -740,9 +742,20 @@ def test_failed_upload_stops_lightning_without_success_receipt(tmp_path, monkeyp
     assert repo.latest() is None
 
 
-def test_watchdog_kills_detached_worker_after_launcher_exits(tmp_path):
+@pytest.mark.parametrize("unsupported_pidfd", [False, True])
+def test_watchdog_kills_detached_worker_after_launcher_exits(
+    tmp_path, monkeypatch, unsupported_pidfd
+):
     import psutil
 
+    wait_calls = []
+    if unsupported_pidfd:
+
+        def unsupported_wait(*args, **kwargs):
+            wait_calls.append(1)
+            raise OSError(errno.EINVAL, "pidfd_open rejected by provider kernel")
+
+        monkeypatch.setattr(psutil, "wait_procs", unsupported_wait)
     ready = tmp_path / "detached-worker.pid"
     child_code = (
         "import os,signal,time,pathlib; "
@@ -771,11 +784,72 @@ def test_watchdog_kills_detached_worker_after_launcher_exits(tmp_path):
         assert detached.is_running()
         stop_process_tree(process, owned, grace_seconds=0.1)
         assert not detached.is_running() or detached.status() == psutil.STATUS_ZOMBIE
+        if unsupported_pidfd:
+            assert len(wait_calls) == 2
     finally:
         stop_process_tree(process, owned, grace_seconds=0.1)
 
 
-def test_hard_watchdog_covers_child_setup_before_torchrun(monkeypatch):
+def test_process_wait_fallback_is_bounded_and_respects_reused_pids(monkeypatch):
+    import psutil
+
+    def unsupported_wait(*args, **kwargs):
+        raise OSError(errno.EINVAL, "unsupported pidfd")
+
+    monkeypatch.setattr(psutil, "wait_procs", unsupported_wait)
+    reused = SimpleNamespace(
+        is_running=lambda: False, status=lambda: pytest.fail("reused PID inspected")
+    )
+    live = SimpleNamespace(is_running=lambda: True, status=lambda: psutil.STATUS_SLEEPING)
+    zombie = SimpleNamespace(is_running=lambda: True, status=lambda: psutil.STATUS_ZOMBIE)
+    started = time.monotonic()
+    gone, alive = wait_owned_processes([reused, live, zombie], timeout=0.1)
+    assert alive == [live]
+    assert gone == [reused, zombie]
+    assert 0.08 <= time.monotonic() - started < 1
+
+
+def test_process_wait_does_not_swallow_other_os_errors(monkeypatch):
+    import psutil
+
+    def forbidden_wait(*args, **kwargs):
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(psutil, "wait_procs", forbidden_wait)
+    with pytest.raises(OSError) as error:
+        wait_owned_processes([], timeout=0.1)
+    assert error.value.errno == errno.EACCES
+
+
+def test_process_cleanup_rejects_a_surviving_writer_under_pidfd_fallback(monkeypatch):
+    import psutil
+
+    def unsupported_wait(*args, **kwargs):
+        raise OSError(errno.EINVAL, "unsupported pidfd")
+
+    monkeypatch.setattr(psutil, "wait_procs", unsupported_wait)
+    alive = SimpleNamespace(
+        suspend=lambda: None,
+        terminate=lambda: None,
+        resume=lambda: None,
+        kill=lambda: None,
+        children=lambda **kwargs: [],
+        is_running=lambda: True,
+        status=lambda: psutil.STATUS_SLEEPING,
+    )
+    launcher = SimpleNamespace(wait=lambda **kwargs: pytest.fail("unverified writer accepted"))
+    with pytest.raises(RuntimeError, match="survived"):
+        stop_process_tree(launcher, {(10, 100.0): alive}, grace_seconds=0.01)
+
+
+@pytest.mark.parametrize("unsupported_pidfd", [False, True])
+def test_hard_watchdog_covers_child_setup_before_torchrun(monkeypatch, unsupported_pidfd):
+    if unsupported_pidfd:
+
+        def unsupported_wait(*args, **kwargs):
+            raise OSError(errno.EINVAL, "unsupported pidfd")
+
+        monkeypatch.setattr("psutil.wait_procs", unsupported_wait)
     real_popen = subprocess.Popen
     children = []
 
@@ -795,6 +869,24 @@ def test_hard_watchdog_covers_child_setup_before_torchrun(monkeypatch):
         supervise(SimpleNamespace(plan_only=False), ["--fixture-setup"])
     assert time.monotonic() - started < 10
     assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_process_wait_fallback_keeps_original_deadline(monkeypatch):
+    import psutil
+
+    clock = [100.0]
+
+    def late_unsupported_wait(*args, **kwargs):
+        clock[0] += kwargs["timeout"]
+        raise OSError(errno.EINVAL, "unsupported pidfd")
+
+    monkeypatch.setattr(psutil, "wait_procs", late_unsupported_wait)
+    monkeypatch.setattr("scripts.train_segment.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "scripts.train_segment.time.sleep", lambda seconds: pytest.fail("deadline reset")
+    )
+    live = SimpleNamespace(is_running=lambda: True, status=lambda: psutil.STATUS_SLEEPING)
+    assert wait_owned_processes([live], timeout=0.1) == ([], [live])
 
 
 def test_segment_runner_requires_explicit_nat_production_selection(tmp_path):

@@ -6,12 +6,13 @@ from torch import Tensor
 
 @torch.no_grad()
 def recording_variance(states: Tensor) -> dict[str, Tensor]:
-    """Decompose a local [recording, time, feature] population's variance.
+    """Decompose a [recording, time, feature] population's variance.
 
     Both terms use population (not unbiased sample) variance. With equal-length
     trajectories, within + between equals the population's total variance.
-    Between-recording variance is estimated inside each local validation batch;
-    averaging these estimates across batches/ranks is not whole-dataset variance.
+    Aligned distributed validation gathers the global recording batch first;
+    standalone calls describe the supplied local population. Averaging these
+    batch estimates is not whole-dataset variance.
     A recording-constant solution has zero within variance even if its batch
     distribution is diverse. A fully collapsed solution makes both terms zero.
     """

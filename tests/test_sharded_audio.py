@@ -200,18 +200,23 @@ def s3_http_endpoint(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_CA_BUNDLE", str(certificate))
 
     class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            self.do_GET()
+
         def do_GET(self):
             parts = unquote(urlsplit(self.path).path).split("/", 2)
             if len(parts) != 3 or parts[1] != "private-bucket" or parts[2] not in store.objects:
                 self.send_error(404)
                 return
             raw = store.objects[parts[2]]
-            store.gets.append((parts[1], parts[2]))
+            if self.command == "GET":
+                store.gets.append((parts[1], parts[2]))
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
-            self.wfile.write(raw)
+            if self.command == "GET":
+                self.wfile.write(raw)
 
         def log_message(self, *_args):
             pass

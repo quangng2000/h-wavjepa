@@ -5,7 +5,7 @@ binaural [Nat temporal model](WAVJEPA_NAT.md). Nat requires a completed, verifie
 training-asset manifest with a pinned SHA-256. The clean mono acceptance receipt
 cannot stand in for a Nat hardware result.
 
-`scripts/train_segment.py` runs one four-H100 segment, saves full Lightning state
+`scripts/train_segment.py` runs one bounded H100 segment, saves full Lightning state
 to private S3, and exits. It does not rent GPUs, restart jobs, transfer credits, or
 top up an account. The intended plan is to use at most the approved **$500 shared
 credit allocation**, pause with a verified checkpoint before that allocation is
@@ -209,6 +209,62 @@ ownership. Resuming with changed assets or switching between mono and Nat fails.
 `scripts/start_nat_segment.py` can fetch the completed staging receipt and its
 hash-verified manifest before invoking this runner; it does not rent GPUs.
 
+### Four persistent single-GPU nodes
+
+An existing checkpoint can also resume on four private-network nodes, with one
+H100 per node. Install the same source revision and frozen inputs on all four;
+inject the separate data/checkpoint credentials on each node. Run the ordinary
+segment command once on every node, adding these options:
+
+```bash
+  --resume --resume-sha256 '<SAME_VERIFIED_CHECKPOINT_SHA256>' \
+  --nnodes 4 --nproc-per-node 1 --node-rank '<0_TO_3>' \
+  --master-addr '<NODE_ZERO_PRIVATE_IPV4>' --master-port 29500 \
+  --shared-started-at '<ONE_UNIX_TIMESTAMP_CAPTURED_BEFORE_LAUNCH>'
+```
+
+Use identical run/segment identities, checkpoint prefix, budget, rate, duration,
+base data seed and input hashes on all nodes. Output and scratch directories
+are node-local and must be fresh, for example `/data/outputs/segment-002` and
+`/data/work/segment-002`. Add `--cache-dir /data/audio-cache` to reuse each node's
+verified shard cache across segments; without it the cache stays under the fresh
+working directory. Keep this cache outside captured output. The rate is the
+**combined four-node rate**. The shared
+timestamp makes setup, download and training consume the same absolute segment
+allowance; starting a late node does not reset it. A four-node launch requires
+an existing pinned checkpoint and cannot initialize a prefix or import a new
+curriculum phase.
+
+Global batch and world size remain unchanged: clean-binaural/Nat use four
+recordings on each of four ranks. Only global rank zero publishes checkpoints
+and the final handoff. Other nodes verify that same final remote receipt and
+write `node-success.json` locally. The orchestrator must wait for **all four
+commands to terminate** before retrying or changing phase. There is no automatic
+Nat transition or automatic retry.
+
+Verify full private-network connectivity between every pair of nodes, including
+NCCL's dynamic ports; the master port alone is insufficient. Set NCCL/Gloo socket
+interfaces to the confirmed private interface. Separate nodes communicate over
+the network instead of local NVLink, so latency and bandwidth may substantially
+reduce update throughput; measure the actual training rate before projecting
+cost. A segment exit leaves persistent nodes allocated and billed. Their shutdown
+and the remaining allocation budget are the orchestrator's responsibility.
+
+### One persistent eight-GPU node
+
+Add `--nnodes 1 --nproc-per-node 8` to run all eight local H100s. The runner keeps
+the original global batch: clean-binaural/Nat use two recordings per rank and
+128 masked crops per update; mono uses eight recordings per rank and global64.
+Optimizer, LR/EMA schedules and checkpoint ownership stay unchanged. Resume the
+same verified checkpoint and use `--cache-dir /data/audio-cache` if desired.
+
+The four-GPU acceptance report does not prove eight-GPU throughput. An explicit
+`--skip-streaming-acceptance --streaming-acceptance-waiver-reason '<reason>'`
+is required for this changed topology, and the receipt records an unpassed,
+waived separate preflight. Use the combined eight-GPU rate when calculating the
+segment budget, and measure actual update throughput before extrapolating time
+or savings. Persistent nodes remain allocated and billed after command exit.
+
 ### Optional clean-to-Nat curriculum
 
 `--clean-binaural` selects `audioset_clean_binaural_h100_four`: clean AudioSet
@@ -266,9 +322,12 @@ publication deadline. Before retransmission, the publisher checks whether an
 ambiguous completion already created the object and verifies all of its bytes.
 Checksum, ownership, permission and permanent API errors still fail immediately.
 
-Production shard reads share a 300-second total deadline across at most three
-requests. Interrupted bodies resume the remaining byte range, requiring exact
-range/length headers and a final whole-object SHA256 match. Worker batches have
+Production shard reads use the official SDK's managed ranged downloads, with
+four 16 MiB parts in flight and a 300-second total deadline. Each transfer runs
+in a separate process so a blocked SDK thread can be terminated and reaped.
+Only a complete size and SHA256 match becomes a cache hit. Resume checkpoints
+use the same verified downloader with separate checkpoint credentials and a
+600-second bound. Worker batches have
 a 360-second timeout, beneath the segment's minimum 720-second DDP timeout.
 The ordinary non-segment presets retain their shorter timeout settings.
 

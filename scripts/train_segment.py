@@ -15,7 +15,9 @@ LR/EMA schedules stay fixed. This changes restart order, not sample-exact resume
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -230,7 +232,136 @@ def verify_streaming_report(
     return file_sha256(path)
 
 
+def launch_topology(args):
+    """Supported GPU layouts; multihost launches require a pinned resume."""
+    nodes = getattr(args, "nnodes", 1)
+    processes = getattr(args, "nproc_per_node", 4)
+    rank = getattr(args, "node_rank", 0)
+    port = getattr(args, "master_port", 29500)
+    if (
+        any(type(value) is not int for value in (nodes, processes, rank, port))
+        or (nodes, processes) not in {(1, 4), (1, 8), (4, 1)}
+        or not 0 <= rank < nodes
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError("Use one node with four/eight ranks or four nodes with one rank each")
+    digest = getattr(args, "resume_sha256", None)
+    started = getattr(args, "shared_started_at", None)
+    address = getattr(args, "master_addr", None)
+    if digest is not None and (not isinstance(digest, str) or not SHA.fullmatch(digest)):
+        raise ValueError("Resume SHA256 must identify the exact immutable checkpoint")
+    if nodes > 1:
+        if (
+            not getattr(args, "resume", False)
+            or digest is None
+            or getattr(args, "curriculum_source_prefix", None) is not None
+        ):
+            raise ValueError(
+                "Multihost training requires --resume and --resume-sha256; no prefix initialization or phase import"
+            )
+        try:
+            host = ipaddress.ip_address(address)
+        except ValueError:
+            raise ValueError("Multihost training requires a private-network master IP") from None
+        private_ipv4 = (
+            host.version == 4
+            and not host.is_loopback
+            and not host.is_unspecified
+            and (
+                host in ipaddress.ip_network("10.0.0.0/8")
+                or host in ipaddress.ip_network("172.16.0.0/12")
+                or host in ipaddress.ip_network("192.168.0.0/16")
+                or host in ipaddress.ip_network("100.64.0.0/10")
+            )
+        )
+        if not private_ipv4:
+            raise ValueError("Multihost master must use the confirmed private IPv4 network")
+        if (
+            isinstance(started, bool)
+            or not isinstance(started, (int, float))
+            or not math.isfinite(started)
+            or started <= 0
+            or started > time.time() + 5
+        ):
+            raise ValueError(
+                "Multihost training requires one shared launch timestamp, captured before launch"
+            )
+        executed = getattr(args, "execute_started", None)
+        if executed is not None and executed != started:
+            raise ValueError("The child cannot reset the shared allocation deadline")
+    elif started is not None or address is not None:
+        raise ValueError("Shared-start and master-address options require multihost training")
+    return {
+        "nnodes": nodes,
+        "nproc_per_node": processes,
+        "node_rank": rank,
+        "master_addr": address,
+        "master_port": port,
+    }
+
+
+def torchrun_command(plan, plan_path):
+    topology = plan.get("distributed", {"nnodes": 1, "nproc_per_node": 4, "node_rank": 0})
+    command = [sys.executable, "-m", "torch.distributed.run"]
+    if topology["nnodes"] == 1:
+        command += [
+            "--standalone",
+            "--local-addr=127.0.0.1",
+            f"--nproc_per_node={topology['nproc_per_node']}",
+        ]
+    else:
+        command += [
+            f"--nnodes={topology['nnodes']}",
+            f"--nproc_per_node={topology['nproc_per_node']}",
+            f"--node_rank={topology['node_rank']}",
+            f"--master_addr={topology['master_addr']}",
+            f"--master_port={topology['master_port']}",
+            "--max_restarts=0",
+            "--rdzv_conf=timeout=720",
+        ]
+    return command + [str(Path(__file__).resolve()), "--worker-plan", str(plan_path.resolve())]
+
+
+def finish_follower(args, repository, *, topology, resume_step, hard_deadline):
+    """Verify this node's durable result without publishing or sealing anything."""
+
+    def check():
+        if time.time() >= hard_deadline - 30:
+            raise TimeoutError("Follower finalization exceeded the shared deadline")
+
+    repository.store.check = check
+    result = json.loads((args.output / "node-finished.json").read_text())
+    if (
+        result.get("node_finished") is not True
+        or result.get("checkpoint_writer") is not False
+        or result.get("node_rank") != topology["node_rank"]
+        or result.get("world_size") != 4
+        or result.get("initial_optimizer_step") != resume_step
+        or result.get("final_optimizer_step", 0) <= resume_step
+        or result.get("checkpoint", {}).get("checkpoint", {}).get("step")
+        != result["final_optimizer_step"]
+        or result.get("checkpoint") != repository.latest()
+    ):
+        raise RuntimeError("Follower lacks a matching final durable checkpoint receipt")
+    atomic_json(args.output / "node-success.json", result)
+    if os.environ.get("GMN_RESULT_PATH"):
+        atomic_json(Path(os.environ["GMN_RESULT_PATH"]), result)
+    print(
+        json.dumps(
+            {
+                "event": "training_node_finished",
+                "node_rank": topology["node_rank"],
+                "final_optimizer_step": result["final_optimizer_step"],
+                "checkpoint_writer": False,
+            }
+        ),
+        flush=True,
+    )
+    return result
+
+
 def validate_launch_options(args):
+    launch_topology(args)
     nat = getattr(args, "nat", False)
     clean = getattr(args, "clean_binaural", False)
     if nat and clean:
@@ -282,6 +413,9 @@ def streaming_acceptance(args):
             "reason": args.streaming_acceptance_waiver_reason.strip(),
             "scope": "separate streaming GPU preflight only; runtime validation and checkpoint integrity remain enabled",
         }
+    topology = launch_topology(args)
+    if (topology["nnodes"], topology["nproc_per_node"]) != (1, 4):
+        raise ValueError("Changed GPU topology requires an explicit separate-preflight waiver")
     if getattr(args, "clean_binaural", False):
         raise ValueError("Clean binaural curriculum requires an explicit preflight waiver")
     if not args.streaming_smoke_report:
@@ -531,7 +665,7 @@ def make_config(plan: dict):
     cfg.data.clean_to_nat_transition = plan.get("clean_to_nat_transition")
     cfg.data.index_path = str(work / "frozen-index.json")
     cfg.data.endpoint = plan["data_endpoint"]
-    cfg.data.cache_dir = str(work / "shard-cache")
+    cfg.data.cache_dir = str(plan.get("cache_dir") or work / "shard-cache")
     cfg.data.cache_max_gib = 60
     if nat:
         manifest = work / "frozen-naturalistic-manifest.json"
@@ -547,6 +681,13 @@ def make_config(plan: dict):
     cfg.data.allow_stream_restart_on_resume = True
     cfg.data.seed = plan["resolved_data_seed"]
     cfg.trainer.min_epochs = cfg.trainer.min_steps = 0
+    topology = plan.get("distributed", {"nnodes": 1, "nproc_per_node": 4})
+    cfg.trainer.devices = topology["nproc_per_node"]
+    cfg.trainer.num_nodes = topology["nnodes"]
+    world_size = cfg.trainer.devices * cfg.trainer.num_nodes
+    if world_size not in {4, 8} or global_batch % world_size:
+        raise ValueError("Distributed layout must evenly partition the original global batch")
+    cfg.data.batch_size = global_batch // world_size
     cfg.trainer.max_epochs = -1
     cfg.trainer.max_steps = 375000
     cfg.trainer.num_sanity_val_steps = 0
@@ -564,7 +705,7 @@ def make_config(plan: dict):
     cfg.ckpt_path = plan["resume_path"]
     cfg.train, cfg.test = True, False
     if (
-        cfg.data.batch_size * cfg.trainer.devices != global_batch
+        cfg.data.batch_size * cfg.trainer.devices * cfg.trainer.num_nodes != global_batch
         or cfg.trainer.get("accumulate_grad_batches", 1) != 1
     ):
         raise ValueError(f"Segment must preserve its global optimizer batch of {global_batch}")
@@ -593,8 +734,16 @@ def worker(plan_path: Path):
     from src.train import train
 
     plan = json.loads(plan_path.read_text())
-    if int(os.environ.get("WORLD_SIZE", "0")) != 4:
-        raise ValueError("Training segment requires exactly four externally launched ranks")
+    topology = plan.get("distributed", {"nnodes": 1, "nproc_per_node": 4, "node_rank": 0})
+    world_size = topology["nnodes"] * topology["nproc_per_node"]
+    if int(os.environ.get("WORLD_SIZE", "0")) != world_size:
+        raise ValueError("Training segment rank count differs from its pinned launch topology")
+    if topology["nnodes"] > 1 and (
+        int(os.environ.get("RANK", "-1")) != topology["node_rank"]
+        or int(os.environ.get("LOCAL_RANK", "-1")) != 0
+        or int(os.environ.get("LOCAL_WORLD_SIZE", "-1")) != 1
+    ):
+        raise ValueError("Worker rank does not match its pinned multihost plan")
     metrics, objects = train(make_config(plan))
     trainer, model = objects["trainer"], objects["model"]
     step = trainer.global_step
@@ -603,6 +752,19 @@ def worker(plan_path: Path):
     callback = trainer.checkpoint_callback
     if callback.last_receipt is None or callback.last_receipt["checkpoint"]["step"] != step:
         raise RuntimeError("Final optimizer step lacks a verified durable checkpoint")
+    if topology["node_rank"] > 0:
+        atomic_json(
+            Path(plan["output"]) / "node-finished.json",
+            {
+                "node_finished": True,
+                "checkpoint_writer": False,
+                "node_rank": topology["node_rank"],
+                "world_size": 4,
+                "initial_optimizer_step": plan["resume_step"],
+                "final_optimizer_step": step,
+                "checkpoint": callback.last_receipt,
+            },
+        )
     dist.barrier()
     if trainer.is_global_zero:
         atomic_json(
@@ -649,6 +811,57 @@ def remember_descendants(owned):
             continue
 
 
+def _owned_process_alive(process):
+    """A reused PID or zombie is not a surviving owned compute process."""
+    import psutil
+
+    try:
+        # psutil's is_running compares the retained PID/create-time identity.
+        # status alone would accidentally wait on a different, reused PID.
+        return process.is_running() and process.status() not in {
+            psutil.STATUS_ZOMBIE,
+            psutil.STATUS_DEAD,
+        }
+    except psutil.NoSuchProcess:
+        return False
+
+
+def wait_owned_processes(processes, *, timeout):
+    """Bounded wait with a polling fallback for kernels without working pidfds.
+
+    Some container kernels expose pidfd_open but reject it with EINVAL. psutil
+    then raises instead of waiting; use its identity-checked process inspection
+    without Process.wait in that case. The fallback inherits the original
+    deadline, and errors other than unsupported waiting remain fail-closed.
+    Root-child reaping is still performed by subprocess.Popen.wait below.
+    """
+    import psutil
+
+    deadline = time.monotonic() + timeout
+    try:
+        return psutil.wait_procs(processes, timeout=timeout)
+    except OSError as error:
+        if error.errno not in {errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
+        print(
+            json.dumps({"event": "process_wait_fallback", "errno": error.errno}),
+            flush=True,
+        )
+    alive, gone = list(processes), []
+    while True:
+        remaining_processes = []
+        for process in alive:
+            if _owned_process_alive(process):
+                remaining_processes.append(process)
+            else:
+                gone.append(process)
+        alive = remaining_processes
+        remaining = deadline - time.monotonic()
+        if not alive or remaining <= 0:
+            return gone, alive
+        time.sleep(min(0.05, remaining))
+
+
 def stop_process_tree(process, owned, *, grace_seconds=10):
     """Stop detached torchrun rank sessions as well as the launcher process.
 
@@ -677,21 +890,15 @@ def stop_process_tree(process, owned, *, grace_seconds=10):
             child.resume()
         except psutil.NoSuchProcess:
             pass
-    _, alive = psutil.wait_procs(list(owned.values()), timeout=grace_seconds)
+    _, alive = wait_owned_processes(list(owned.values()), timeout=grace_seconds)
     for child in alive:
         try:
             child.kill()
         except psutil.NoSuchProcess:
             pass
-    _, alive = psutil.wait_procs(alive, timeout=grace_seconds)
+    _, alive = wait_owned_processes(alive, timeout=grace_seconds)
     # A reparented zombie has released compute resources and awaits init's reap.
-    surviving = []
-    for child in alive:
-        try:
-            if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-                surviving.append(child)
-        except psutil.NoSuchProcess:
-            pass
+    surviving = [child for child in alive if _owned_process_alive(child)]
     if surviving:
         raise RuntimeError("Owned training processes survived the hard watchdog")
     process.wait(timeout=1)
@@ -715,8 +922,10 @@ def supervise(args, raw_args):
     if args.plan_only:
         print(json.dumps(budget.report(), indent=2))
         return
-    started = time.time()
-    hard_stop = time.monotonic() + budget.seconds - 30
+    started = getattr(args, "shared_started_at", None) or time.time()
+    hard_stop = time.monotonic() + started + budget.seconds - time.time() - 30
+    if hard_stop <= time.monotonic():
+        raise TimeoutError("Shared segment allowance expired before local launch")
     process = subprocess.Popen(
         [
             sys.executable,
@@ -753,6 +962,7 @@ def supervise(args, raw_args):
 
 def execute_segment(args):
     budget = segment_budget(args)
+    topology = launch_topology(args)
     if not args.exclusive_checkpoint_writer or not args.acknowledge_stream_restart:
         raise ValueError(
             "Explicit exclusive-writer and stream-restart acknowledgements are required"
@@ -814,6 +1024,9 @@ def execute_segment(args):
     if args.resume:
         resume_path = args.work_dir / "resume.ckpt"
         receipt = repository.download_latest(resume_path)
+        pinned_resume = getattr(args, "resume_sha256", None)
+        if pinned_resume is not None and receipt["checkpoint"]["sha256"] != pinned_resume:
+            raise ValueError("Resume checkpoint differs from the shared pinned SHA256")
         resume_step = verify_resume_state(
             resume_path,
             receipt,
@@ -849,6 +1062,8 @@ def execute_segment(args):
     check()
     plan = {
         "segment_id": args.segment_id,
+        "distributed": topology,
+        "pinned_resume_sha256": getattr(args, "resume_sha256", None),
         "nat": nat,
         "clean_binaural": clean,
         "clean_to_nat_transition": transition,
@@ -869,6 +1084,9 @@ def execute_segment(args):
         if nat
         else ("temporal_aggregation" if temporal else "pointwise"),
         "work_dir": str(args.work_dir.resolve()),
+        "cache_dir": str(
+            (getattr(args, "cache_dir", None) or args.work_dir / "shard-cache").resolve()
+        ),
         "output": str(args.output.resolve()),
         "repository_options": repository_options | {"endpoint": args.checkpoint_endpoint},
         "data_endpoint": args.data_endpoint,
@@ -888,22 +1106,23 @@ def execute_segment(args):
     }
     plan_path = args.output / "segment-plan.json"
     atomic_json(plan_path, plan)
-    command = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--standalone",
-        "--local-addr=127.0.0.1",
-        "--nproc_per_node=4",
-        str(Path(__file__).resolve()),
-        "--worker-plan",
-        str(plan_path.resolve()),
-    ]
+    command = torchrun_command(plan, plan_path)
     # torchrun creates a new session for each rank. The parent's watchdog tracks
     # descendant PID/create-time identities rather than assuming shared PGIDs.
     code = subprocess.Popen(command, cwd=ROOT, start_new_session=False).wait()
     if code:
         raise RuntimeError(f"Training segment exited unsuccessfully (code {code})")
+    if topology["node_rank"] > 0:
+        # Only node zero owns final publication. Other nodes have independent
+        # filesystems and cannot read its local segment-finished.json.
+        finish_follower(
+            args,
+            repository,
+            topology=topology,
+            resume_step=resume_step,
+            hard_deadline=hard_deadline,
+        )
+        return
     result_path = args.output / "segment-finished.json"
     result = json.loads(result_path.read_text())
     if (
@@ -912,8 +1131,9 @@ def execute_segment(args):
     ):
         raise RuntimeError("Worker exited without an advanced, verified final checkpoint")
     if clean:
-        # The torchrun process exited successfully, so no training rank is still
-        # mutating this prefix. Seal its final checkpoint for the dependent Nat job.
+        # The sole checkpoint writer's local torchrun process has exited. Remote
+        # followers never publish to this prefix. The orchestrator still waits
+        # for all four node commands before launching the next training phase.
         def handoff_check():
             if time.time() >= hard_deadline - 30:
                 raise TimeoutError("Clean handoff exceeded segment deadline")
@@ -949,6 +1169,13 @@ def main(argv=None):
     parser.add_argument("--worker-plan", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--execute-started", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--nnodes", type=int, default=1)
+    parser.add_argument("--nproc-per-node", type=int, default=4)
+    parser.add_argument("--node-rank", type=int, default=0)
+    parser.add_argument("--master-addr")
+    parser.add_argument("--master-port", type=int, default=29500)
+    parser.add_argument("--shared-started-at", type=float)
+    parser.add_argument("--resume-sha256")
     parser.add_argument(
         "--temporal",
         action="store_true",
@@ -978,6 +1205,9 @@ def main(argv=None):
     parser.add_argument("--segment-id")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--work-dir", type=Path)
+    parser.add_argument(
+        "--cache-dir", type=Path, help="Persistent node-local audio cache outside output"
+    )
     parser.add_argument("--index", type=Path)
     parser.add_argument("--index-sha256")
     parser.add_argument("--data-endpoint", default="https://storage.givemeanode.com")

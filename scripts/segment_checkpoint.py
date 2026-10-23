@@ -343,12 +343,29 @@ class CheckpointRepository:
             raise ValueError("Clean curriculum handoff does not match its pinned source checkpoint")
         return handoff
 
-    def download_latest(self, destination: Path) -> dict:
+    def download_latest(self, destination: Path, *, timeout_seconds=600) -> dict:
         self.assert_owner()
         receipt = self.latest()
         if receipt is None:
             raise ValueError("No verified checkpoint to resume")
         record = receipt["checkpoint"]
+        from scripts.checkpoint_transfer import download_verified_object, managed_download_client
+
+        if managed_download_client(self.store.client):
+            download_verified_object(
+                self.store.client,
+                self.store.bucket,
+                record["key"],
+                destination,
+                size=record["bytes"],
+                sha256=record["sha256"],
+                timeout_seconds=timeout_seconds,
+                credential_scope="checkpoint",
+                check=self.store.check,
+            )
+            return receipt
+        # Explicitly injected memory-store test doubles keep their existing API;
+        # every real botocore client uses the bounded managed transport above.
         temporary = destination.with_suffix(".partial")
         destination.parent.mkdir(parents=True, exist_ok=True)
         result = self.store.client.get_object(Bucket=self.store.bucket, Key=record["key"])

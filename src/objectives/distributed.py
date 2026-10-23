@@ -6,9 +6,10 @@ produces exactly the gradient of one loss over the global population. Do not
 divide the loss by world size. Other local-mean objectives require equal local
 batch sizes, which this adapter checks collectively before gathering activations.
 
-Evaluation defaults to local statistics and performs no collectives: validation
-loaders may have unequal lengths. Gradient accumulation does not enlarge the
-population used by an individual invocation.
+Standalone evaluation defaults to local statistics and performs no collectives:
+loaders may have unequal lengths. Aligned Lightning validation/test loaders opt
+in explicitly to global statistics without autograd. Gradient accumulation does
+not enlarge the population used by an individual invocation.
 """
 
 from collections.abc import Iterator
@@ -57,7 +58,13 @@ def prepare_population(
         if shape[1] * dist.get_world_size() < 2:
             raise ValueError(message)
         # Floating cast retains the local graph, including BF16 producer gradients.
-        states = torch.cat(all_gather(states.float().contiguous()), dim=1)
+        local = states.float().contiguous()
+        if torch.is_grad_enabled():
+            states = torch.cat(all_gather(local), dim=1)
+        else:
+            population = [torch.empty_like(local) for _ in range(dist.get_world_size())]
+            dist.all_gather(population, local)
+            states = torch.cat(population, dim=1)
     else:
         if not valid or states.size(1) < 2:
             raise ValueError(message)

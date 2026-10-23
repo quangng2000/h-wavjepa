@@ -104,10 +104,18 @@ global population of 64. Peak allocated memory was approximately 29.4 GiB per GP
 run; [validation evidence](VALIDATION.md) separates these checks from sustained
 real-data throughput and downstream-quality claims.
 
-Validation/test statistics use local populations without all-gather, and
-multi-device held-out sampling can repeat tail entries. Training and validation
-regularizer values therefore need not have the same scale or neighborhoods.
-For final evaluation, use one device and keep the batch size/order fixed.
+Aligned Lightning validation/test now gathers the global recording batch without
+autograd for regularization and nonlinear diagnostic statistics. A global batch
+of 16 therefore uses 16 recordings with either four ranks of four or eight ranks
+of two. `val/diagnostic_recordings` and `test/diagnostic_recordings` record this
+population size. Earlier distributed validation used local populations, so its
+regularizer values and between-recording variance are not directly comparable
+with the corrected values. Training's global-population objective is unchanged.
+The sharded loader gives every rank equally many complete held-out batches;
+callers with unequal loader lengths must not use synchronized evaluation.
+Standalone `compute_loss` evaluation remains local and collective-free by default.
+For final comparisons, keep the global batch and sample grouping/order fixed;
+equal population sizes alone do not imply identical nonlinear batch statistics.
 See the [AudioSet guide](AUDIOSET.md) for exact sampling and launch settings.
 
 For each zero-indexed level, Lightning logs `localereg_configured_clusters`,
