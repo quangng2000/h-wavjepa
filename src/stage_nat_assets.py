@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -54,6 +55,71 @@ WHAM_BYTES = 18194930748
 INVENTORY = (
     Path(__file__).resolve().parents[1] / "docs/validation/wavjepa-nat-assets-2026-10-23.json"
 )
+
+
+def _error_status_code(error):
+    # Transport exceptions have response=None, unlike botocore ClientError.
+    # Preserve the real failure instead of masking it with AttributeError.
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return None, ""
+    metadata, detail = response.get("ResponseMetadata"), response.get("Error")
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+    code = str(detail.get("Code", "")) if isinstance(detail, Mapping) else ""
+    return status, code
+
+
+def _transient_transport_error(error):
+    # Keep boto3 optional for converter-only installations and CPU fixtures.
+    try:
+        from botocore.exceptions import (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+            ResponseStreamingError,
+        )
+    except ImportError:
+        return False
+    return isinstance(
+        error,
+        (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+            ResponseStreamingError,
+        ),
+    )
+
+
+def _wait_checked(check, seconds):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        check()
+        time.sleep(max(0, min(0.25, end - time.monotonic())))
+    check()
+
+
+def _failure_diagnostic(error):
+    """Keep useful frames and types, never exception messages, source or locals."""
+    failures, seen = [], set()
+    while error is not None and id(error) not in seen and len(failures) < 4:
+        seen.add(id(error))
+        frames, trace = [], error.__traceback__
+        while trace is not None:
+            code = trace.tb_frame.f_code
+            frames.append(
+                {
+                    "file": Path(code.co_filename).name,
+                    "function": code.co_name,
+                    "line": trace.tb_lineno,
+                }
+            )
+            trace = trace.tb_next
+        failures.append({"type": type(error).__name__, "frames": frames[-12:]})
+        error = error.__cause__ if error.__cause__ is not None else error.__context__
+    return {"failure_type": failures[0]["type"], "failure_trace": failures}
 
 
 def read_inventory(path: Path) -> list[dict]:
@@ -123,12 +189,11 @@ class LimitedClient:
                 try:
                     return operation(**kwargs)
                 except Exception as error:
-                    response = getattr(error, "response", {})
-                    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-                    code = str(response.get("Error", {}).get("Code", ""))
+                    status, code = _error_status_code(error)
                     if attempt == 5 or (
                         status not in (429, 500, 502, 503, 504)
                         and code not in {"SlowDown", "Throttling", "RequestTimeout"}
+                        and not _transient_transport_error(error)
                     ):
                         raise
                     self._wait(min(30, 2**attempt))
@@ -136,19 +201,37 @@ class LimitedClient:
         return call
 
     def _wait(self, seconds):
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            self.check()
-            time.sleep(max(0, min(0.25, end - time.monotonic())))
-        self.check()
+        _wait_checked(self.check, seconds)
 
 
 class NatStore(Store):
     """Two requests per fresh payload: conditional PUT, then full GET proof."""
 
-    def verify(self, key, digest, size):
+    def head(self, key):
         self.check()
-        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        try:
+            return self.client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as error:
+            status, code = _error_status_code(error)
+            if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+
+    def verify(self, key, digest, size):
+        for attempt in range(6):
+            self.check()
+            # Request failures already receive LimitedClient's bounded retries.
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            try:
+                return self._verify_response(response, key, digest, size)
+            except Exception as error:
+                # get_object can succeed before the streaming body disconnects.
+                # Restart its full proof from byte zero; never accept a prefix.
+                if attempt == 5 or not _transient_transport_error(error):
+                    raise
+                _wait_checked(self.check, min(30, 2**attempt))
+
+    def _verify_response(self, response, key, digest, size):
         actual, count = hashlib.sha256(), 0
         with contextlib.closing(response["Body"]) as handle:
             if response.get("ContentLength") != size:
@@ -186,10 +269,8 @@ class NatStore(Store):
                     IfNoneMatch="*",
                 )
         except Exception as error:
-            response = getattr(error, "response", {})
-            if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 412 and str(
-                response.get("Error", {}).get("Code")
-            ) not in {"412", "PreconditionFailed"}:
+            status, code = _error_status_code(error)
+            if status != 412 and code not in {"412", "PreconditionFailed"}:
                 raise
         return self.verify(key, digest, size)
 
@@ -197,10 +278,8 @@ class NatStore(Store):
         try:
             return self.client.put_object(Bucket=self.bucket, IfNoneMatch="*", **kwargs)
         except Exception as error:
-            response = getattr(error, "response", {})
-            if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 412 and str(
-                response.get("Error", {}).get("Code")
-            ) not in {"412", "PreconditionFailed"}:
+            status, code = _error_status_code(error)
+            if status != 412 and code not in {"412", "PreconditionFailed"}:
                 raise
 
     def put_file(self, key, path, digest):
@@ -897,8 +976,7 @@ class NatStager:
             "updated_at": time.time(),
         }
         if failure is not None:
-            # Exception type only: SDK errors can contain signed URLs or auth details.
-            value["failure_type"] = type(failure).__name__
+            value.update(_failure_diagnostic(failure))
         _atomic_json(self.output / "status.json", value)
         return value
 
@@ -1021,9 +1099,8 @@ def main():
         print(json.dumps(result), flush=True)
     except Exception as error:
         # Never print unfiltered network exceptions, credentials or redirected URLs.
-        save_result(
-            {"status": "failed", "ready_for_training": False, "failure_type": type(error).__name__}
-        )
+        save_result({"status": "failed", "ready_for_training": False, **_failure_diagnostic(error)})
+        print(json.dumps(_failure_diagnostic(error)), flush=True)
         parser.exit(
             2,
             f"Nat staging stopped ({type(error).__name__}); inspect retained local status and receipts.\n",

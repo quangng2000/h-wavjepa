@@ -175,6 +175,125 @@ def test_limiter_retries_throttle_and_rewinds_put_body(monkeypatch):
         staging.LimitedClient(client, lambda: None, 10)
 
 
+@pytest.mark.parametrize("failure", ["ReadTimeoutError", "ConnectionClosedError"])
+def test_transport_failure_with_no_response_retries_and_rewinds_body(monkeypatch, failure):
+    errors = pytest.importorskip("botocore.exceptions")
+    error = getattr(errors, failure)(endpoint_url="https://signed.example/?secret=private")
+    assert error.response is None
+
+    class Interrupted:
+        calls = 0
+
+        def put_object(self, **kwargs):
+            self.calls += 1
+            assert kwargs["Body"].read() == b"entire object"
+            if self.calls == 1:
+                raise error
+            return {"ok": True}
+
+    client = Interrupted()
+    limiter = staging.LimitedClient(client, lambda: None)
+    delays = []
+    monkeypatch.setattr(limiter, "_wait", delays.append)
+    assert limiter.put_object(Body=io.BytesIO(b"entire object")) == {"ok": True}
+    assert client.calls == 2 and 1 in delays
+
+
+def test_exhausted_transport_retries_preserve_original_failure(monkeypatch):
+    errors = pytest.importorskip("botocore.exceptions")
+    error = errors.ReadTimeoutError(endpoint_url="https://signed.example/?secret=private")
+
+    class Interrupted:
+        calls = 0
+
+        def head_object(self, **kwargs):
+            self.calls += 1
+            raise error
+
+    client = Interrupted()
+    limiter = staging.LimitedClient(client, lambda: None)
+    monkeypatch.setattr(limiter, "_wait", lambda seconds: None)
+    store = staging.NatStore(limiter, "bucket", lambda: None)
+    with pytest.raises(errors.ReadTimeoutError) as caught:
+        store.head("component")
+    assert caught.value is error and client.calls == 6
+
+
+@pytest.mark.parametrize("operation", ["payload", "control"])
+def test_immutable_put_preserves_transport_failure_without_response(tmp_path, operation):
+    errors = pytest.importorskip("botocore.exceptions")
+    error = errors.ReadTimeoutError(endpoint_url="https://signed.example/?secret=private")
+
+    class Interrupted:
+        def put_object(self, **kwargs):
+            raise error
+
+    store = staging.NatStore(Interrupted(), "bucket", lambda: None)
+    path = tmp_path / "payload"
+    path.write_bytes(b"converted fixture")
+    with pytest.raises(errors.ReadTimeoutError) as caught:
+        if operation == "payload":
+            store.put_payload("key", path, staging.sha256_file(path))
+        else:
+            store.put_json("key", {"value": True}, immutable=True)
+    assert caught.value is error
+
+
+def test_full_get_restarts_proof_after_interrupted_stream(monkeypatch):
+    errors = pytest.importorskip("botocore.exceptions")
+    payload = b"full object"
+
+    class InterruptedBody(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                raise errors.ResponseStreamingError(error="private signed URL")
+            return super().read(3)
+
+    interrupted = InterruptedBody(payload)
+
+    class Interrupted:
+        calls = 0
+
+        def get_object(self, **kwargs):
+            self.calls += 1
+            return {
+                "Body": interrupted if self.calls == 1 else io.BytesIO(payload),
+                "ContentLength": len(payload),
+                "ETag": "verified",
+            }
+
+    client = Interrupted()
+    delays = []
+    monkeypatch.setattr(staging, "_wait_checked", lambda check, delay: delays.append(delay))
+    store = staging.NatStore(client, "bucket", lambda: None)
+    digest = hashlib.sha256(payload).hexdigest()
+    assert store.verify("key", digest, len(payload))["sha256"] == digest
+    assert interrupted.closed and client.calls == 2 and delays == [1]
+
+
+def test_failure_diagnostics_preserve_frames_without_sensitive_content(factory):
+    secret = "https://signed.example/?secret=never-serialize-this"
+    try:
+        try:
+            raise RuntimeError(secret)
+        except RuntimeError as cause:
+            raise AttributeError(secret) from cause
+    except AttributeError as error:
+        diagnostic = factory().status("failed", failure=error)
+    encoded = json.dumps(diagnostic)
+    assert "signed.example" not in encoded and "never-serialize-this" not in encoded
+    assert diagnostic["failure_type"] == "AttributeError"
+    assert [item["type"] for item in diagnostic["failure_trace"]] == [
+        "AttributeError",
+        "RuntimeError",
+    ]
+    assert diagnostic["failure_trace"][0]["frames"][-1] == {
+        "file": "test_stage_nat_assets.py",
+        "function": "test_failure_diagnostics_preserve_frames_without_sensitive_content",
+        "line": diagnostic["failure_trace"][0]["frames"][-1]["line"],
+    }
+
+
 def test_immutable_control_publication_never_overwrites_competing_content(tmp_path):
     client = FakeS3()
     store = staging.NatStore(client, "bucket", lambda: None)
