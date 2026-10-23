@@ -85,6 +85,14 @@ Use `tasks_open=true`, `task_max_runners=1`, `task_max_attempts=1`,
 its task lease while training. Supply a SHA256-pinned JSON launch plan and an
 initial task with `action: train` and the same `plan_sha256`.
 
+When applying a small source overlay to a cached image, package the Python
+bootstrap with `scripts/package_runtime_bootstrap.py`. It compresses the payload,
+verifies its SHA256 before execution, and refuses a shell command above 64 KiB.
+The provider passes the whole command as one shell argument; a raw base64 overlay
+can exceed Linux's 128 KiB per-argument limit before any worker starts. Larger
+overlays belong in an uploaded image/context. A failure before the worker starts
+cannot retain the allocation for repair.
+
 The plan fixes the resume command, checkpoint identity, source-file repair
 allowlist, output and scratch roots, total runtime, and spending ceiling. The
 current wrapper accepts `train_segment.py --resume`; it does not bootstrap the
