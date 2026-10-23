@@ -7,6 +7,7 @@ import sys
 import time
 from copy import deepcopy
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import lightning as L
@@ -244,35 +245,163 @@ def test_budget_includes_platform_margin_and_cannot_silently_exceed_allocation(c
     assert json.loads(capsys.readouterr().out)["account_balance_checked_by_runner"] is False
 
 
-def test_hardware_gate_rejects_fork_or_incomplete_streaming_evidence(tmp_path):
-    report = {
+def streaming_report(*, temporal=True):
+    from test_hierarchical_dynamics import model_factory
+
+    from scripts.benchmark_streaming_gpu import architecture_facts
+
+    architecture = architecture_facts(
+        model_factory(
+            aggregation_windows=[1, 2, 2] if temporal else [1, 1, 1],
+            temporal_variance_weight=0.1 if temporal else 0.0,
+        )
+    )
+    losses = {
+        "temporal_variance_loss": 0.05,
+        "level_1/temporal_variance_loss": 0.02,
+        "level_2/temporal_variance_loss": 0.03,
+    }
+    common = {
+        "world_size": 4,
+        "architecture": architecture,
+        "optimizer_steps": 400,
+        "ema_updates": 400,
+        "frozen_index_sha256": "a" * 64,
+    }
+    return {
         "ok": True,
+        "model_variant": "temporal_aggregation" if temporal else "pointwise",
+        "architecture": architecture,
         "data_worker_start_method": "spawn",
         "workers_per_rank": 1,
         "cache_refills_observed_on_all_ranks": True,
-        "checkpoint": {"strict_tensor_and_metadata_roundtrip": True},
+        "durable_checkpoint_required": True,
+        "frozen_index": {
+            "source_index_sha256": "a" * 64,
+            "frozen_index_sha256": "a" * 64,
+            "status": "complete",
+            "verified_sources": 889,
+            "split_counts": {"val": 130},
+            "validation_clips": 130,
+            "validation_used_clips": 128,
+            "validation_excluded_tail_clips": 2,
+        },
+        "checkpoint": {
+            "strict_tensor_and_metadata_roundtrip": True,
+            "bytes": 1024,
+            "architecture": architecture,
+            "durable_s3": {
+                "architecture": architecture,
+                "complete_remote_readback_verified": True,
+                "download_sha256_verified": True,
+                "strict_tensor_and_metadata_roundtrip": True,
+                "receipt": {
+                    "owner": {"index_sha256": "a" * 64},
+                    "checkpoint": {"step": 400, "bytes": 1024},
+                },
+            },
+        },
         "ranks": [
             {
+                **common,
                 "rank": rank,
-                "world_size": 4,
+                "global_batch": 64,
                 "online_weights_changed": True,
                 "all_model_parameters_finite": True,
+                "data_worker_start_method": "spawn",
+                "workers_per_rank": 1,
+                "cache_refills_observed_after_warmup": True,
+                "rank_cache_at_train_end": {"verified_files": 4},
+                "rank_cache_at_warmup": {"verified_files": 1},
+                "temporal_training_samples": [{"optimizer_step": 1, "metrics": losses}],
+            }
+            for rank in range(4)
+        ],
+        "validation": [
+            {
+                **common,
+                "rank": rank,
+                "clips": 32,
+                "global_used_clips": 128,
+                "global_excluded_tail_clips": 2,
+                "metrics": {
+                    "val/loss": 1.0,
+                    **{f"val/{key}": value for key, value in losses.items()},
+                },
             }
             for rank in range(4)
         ],
     }
+
+
+@pytest.mark.parametrize("temporal", [False, True])
+def test_hardware_gate_accepts_only_matching_model_and_complete_corpus(tmp_path, temporal):
+    path = tmp_path / "streaming.json"
+    path.write_text(json.dumps(streaming_report(temporal=temporal)))
+    assert (
+        len(verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=temporal)) == 64
+    )
+    with pytest.raises(ValueError, match="streaming probe"):
+        verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=not temporal)
+    with pytest.raises(ValueError, match="streaming probe"):
+        verify_streaming_report(path, expected_index_sha256="b" * 64, temporal=temporal)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "fork",
+        "missing_validation",
+        "partial_validation",
+        "partial_index",
+        "wrong_sha",
+        "pointwise_geometry",
+        "no_floor",
+        "no_temporal_samples",
+        "nonfinite_temporal",
+        "no_remote_readback",
+        "wrong_checkpoint_index",
+        "stale_rank",
+        "no_rank_refill",
+        "nonfinite_validation",
+    ],
+)
+def test_temporal_gate_rejects_incomplete_or_mismatched_hardware_evidence(tmp_path, damage):
+    report = streaming_report()
+    if damage == "fork":
+        report["data_worker_start_method"] = "fork"
+    elif damage == "missing_validation":
+        report.pop("validation")
+    elif damage == "partial_validation":
+        report["validation"][0]["clips"] = 16
+    elif damage == "partial_index":
+        report["frozen_index"]["status"] = "partial"
+    elif damage == "wrong_sha":
+        report["frozen_index"]["frozen_index_sha256"] = "b" * 64
+    elif damage == "pointwise_geometry":
+        report["architecture"]["aggregation_windows"] = [1, 1, 1]
+    elif damage == "no_floor":
+        report["architecture"]["temporal_variance_weight"] = 0
+    elif damage == "no_temporal_samples":
+        report["ranks"][2]["temporal_training_samples"] = []
+    elif damage == "nonfinite_temporal":
+        report["ranks"][2]["temporal_training_samples"][0]["metrics"]["temporal_variance_loss"] = (
+            float("nan")
+        )
+    elif damage == "no_remote_readback":
+        report["checkpoint"]["durable_s3"]["complete_remote_readback_verified"] = False
+    elif damage == "wrong_checkpoint_index":
+        report["checkpoint"]["durable_s3"]["receipt"]["owner"]["index_sha256"] = "b" * 64
+    elif damage == "stale_rank":
+        report["ranks"][1]["ema_updates"] = 399
+    elif damage == "no_rank_refill":
+        report["ranks"][3]["rank_cache_at_train_end"]["verified_files"] = 1
+    elif damage == "nonfinite_validation":
+        report["validation"][1]["metrics"]["val/loss"] = float("nan")
     path = tmp_path / "streaming.json"
     path.write_text(json.dumps(report))
-    assert len(verify_streaming_report(path)) == 64
-    for key, value in (
-        ("data_worker_start_method", "fork"),
-        ("ok", False),
-        ("workers_per_rank", 2),
-    ):
-        changed = report | {key: value}
-        path.write_text(json.dumps(changed))
-        with pytest.raises(ValueError, match="streaming probe"):
-            verify_streaming_report(path)
+    with pytest.raises(ValueError, match="streaming probe"):
+        verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=True)
 
 
 def plan(tmp_path):
@@ -291,8 +420,11 @@ def plan(tmp_path):
     }
 
 
-def test_production_config_preserves_objective_global_batch_and_absolute_schedule(tmp_path):
-    cfg = make_config(plan(tmp_path))
+@pytest.mark.parametrize("temporal", [False, True])
+def test_production_config_preserves_objective_global_batch_and_absolute_schedule(
+    tmp_path, temporal
+):
+    cfg = make_config(plan(tmp_path) | {"temporal": temporal})
     validate_config(cfg)
     assert cfg.trainer.devices == 4 and cfg.data.batch_size == 16
     assert cfg.data.num_workers == 1 and cfg.data.allow_partial_index is False
@@ -306,6 +438,14 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     assert cfg.ckpt_path == "/tmp/verified-resume.ckpt"
     assert cfg.seed == 42 and cfg.data.seed == 1042
     assert list(cfg.callbacks) == ["timer", "model_checkpoint"]
+    assert list(cfg.model.aggregation_windows) == ([1, 2, 2] if temporal else [1, 1, 1])
+    assert cfg.model.temporal_variance_weight == (0.1 if temporal else 0)
+    logger = instantiate(cfg.logger.csv)
+    assert Path(logger.log_dir) == tmp_path / "output" / "metrics" / "training"
+    logger.log_metrics({"train/level_2/temporal_variance_loss": 0.08}, step=50)
+    logger.save()
+    assert "temporal_variance_loss" in (Path(logger.log_dir) / "metrics.csv").read_text()
+    assert cfg.model.backbone.config.compact_masked_tokens is True
 
 
 @pytest.mark.parametrize(

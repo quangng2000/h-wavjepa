@@ -9,7 +9,8 @@ Planned segments within the remaining approved allocation do not need fresh
 approval; each still needs a balance and spending-limit check before launch.
 
 Full training is still gated on the completed AudioSet index and a successful
-four-GPU streaming probe using **one spawned data worker per rank**. The failed
+four-GPU streaming probe using **one spawned data worker per rank**, the same
+model variant, and the exact completed index SHA256. The failed
 fork-worker probe and the successful local-audio timing run do not pass this gate.
 See [measured performance and remaining limitations](PERFORMANCE.md).
 
@@ -63,7 +64,11 @@ an exact wall-clock guarantee; the segment watchdog still bounds the whole job.
   bytes. The pipeline never substitutes an updated index during resume.
 - `streaming-benchmark-success.json` from a passing four-GPU streaming probe with
   one spawned worker per rank, cache refills on every rank, finite parameter
-  updates, and a verified full checkpoint roundtrip.
+  updates, full held-out validation (apart from the global-batch tail), and a
+  verified full checkpoint upload/readback/download roundtrip through private S3.
+  Every rank and checkpoint must carry the selected model's geometry and the
+  completed index hash. Temporal runs also require finite upper temporal-loss
+  evidence; a pointwise report cannot authorize a temporal run.
 - An existing private checkpoint bucket and an empty, dedicated run prefix,
   such as `training/training-run-20261023`. The last prefix component must equal
   `--run-id`. Only one writer may use this prefix at a time.
@@ -87,7 +92,7 @@ Put the working directory outside the platform's automatically collected output
 directory so cached shards and large local checkpoints are not exported twice.
 
 ```bash
-python -u scripts/train_segment.py \
+python -u scripts/train_segment.py --temporal \
   --segment-hours 10 --budget-usd 160 --maximum-rate-usd-per-hour 15.12 \
   --finalization-reserve-seconds 1800 --transfer-timeout-seconds 600 \
   --run-id training-run-20261023 --segment-id segment-001 \
@@ -102,6 +107,12 @@ python -u scripts/train_segment.py \
   --streaming-smoke-report /inputs/streaming-benchmark-success.json \
   --exclusive-checkpoint-writer --acknowledge-stream-restart
 ```
+
+`--temporal` selects `audioset_temporal_h100_four`: aggregation windows
+`[1, 2, 2]`, supports `[1, 2, 4]`, and temporal-variance weight `0.1`, matching
+its passing streaming acceptance report. Omitting the flag retains the pointwise
+baseline, which requires its own matching report. Keep the same model selection
+on every resumed segment; checkpoint metadata rejects a changed objective.
 
 The first launch initializes an ownership marker in the empty prefix. To resume,
 use the same run ID, prefix, bucket, base data seed, and frozen index; add
@@ -143,6 +154,11 @@ The previous durable checkpoint remains available; failure never triggers an
 automatic fallback or restart. A hard kill may lose work since the last verified
 checkpoint. Inspect `latest.json` and download verification before retrying after
 an ambiguous upload result. There are no platform checkpoint POST/yield calls.
+
+Loss curves and temporal diagnostics are flushed to small CSV files beneath
+`<output>/metrics/training/`; cached audio and full checkpoints remain in the
+separate working directory. The final receipt includes the model variant and
+final scalar metrics.
 
 Small local records are `segment-plan.json`, `latest-checkpoint.json`, optional
 `resumed-checkpoint.json`, and, only after a verified advancing finish,

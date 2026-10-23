@@ -94,27 +94,99 @@ class SegmentBudget:
         }
 
 
-def verify_streaming_report(path: Path):
+def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal: bool = False):
+    """Bind production to the tested model, completed corpus and durable handoff."""
+    from scripts.benchmark_streaming_gpu import require_architecture, temporal_loss_metrics
+
     report = json.loads(path.read_text())
-    ranks = report.get("ranks", [])
-    if (
-        report.get("ok") is not True
-        or report.get("data_worker_start_method") != "spawn"
-        or report.get("workers_per_rank") != 1
-        or report.get("cache_refills_observed_on_all_ranks") is not True
-        or report.get("checkpoint", {}).get("strict_tensor_and_metadata_roundtrip") is not True
-        or len(ranks) != 4
-        or any(
-            row.get("rank") != rank
-            or row.get("world_size") != 4
-            or row.get("online_weights_changed") is not True
-            or row.get("all_model_parameters_finite") is not True
-            for rank, row in enumerate(ranks)
-        )
-    ):
+    ranks, validation = report.get("ranks", []), report.get("validation", [])
+    frozen, checkpoint = report.get("frozen_index", {}), report.get("checkpoint", {})
+    durable = checkpoint.get("durable_s3", {})
+    receipt = durable.get("receipt", {})
+    try:
+        validation_clips = frozen["split_counts"]["val"]
+        used_clips = validation_clips // 64 * 64
+        steps = ranks[0]["optimizer_steps"]
+        if (
+            not SHA.fullmatch(expected_index_sha256)
+            or report.get("ok") is not True
+            or report.get("model_variant") != ("temporal_aggregation" if temporal else "pointwise")
+            or report.get("data_worker_start_method") != "spawn"
+            or report.get("workers_per_rank") != 1
+            or report.get("cache_refills_observed_on_all_ranks") is not True
+            or report.get("durable_checkpoint_required") is not True
+            or frozen.get("status") != "complete"
+            or frozen.get("verified_sources") != 889
+            or frozen.get("frozen_index_sha256") != expected_index_sha256
+            or frozen.get("source_index_sha256") != expected_index_sha256
+            or used_clips <= 0
+            or frozen.get("validation_used_clips") != used_clips
+            or frozen.get("validation_clips") != validation_clips
+            or frozen.get("validation_excluded_tail_clips") != validation_clips - used_clips
+            or checkpoint.get("strict_tensor_and_metadata_roundtrip") is not True
+            or checkpoint.get("bytes", 0) <= 0
+            or len(ranks) != 4
+            or len(validation) != 4
+            or type(steps) is not int
+            or steps <= 0
+            or any(
+                durable.get(field) is not True
+                for field in (
+                    "complete_remote_readback_verified",
+                    "download_sha256_verified",
+                    "strict_tensor_and_metadata_roundtrip",
+                )
+            )
+            or receipt.get("owner", {}).get("index_sha256") != expected_index_sha256
+            or receipt.get("checkpoint", {}).get("step") != steps
+            or receipt.get("checkpoint", {}).get("bytes") != checkpoint["bytes"]
+        ):
+            raise ValueError("Incomplete or mismatched streaming acceptance evidence")
+        for item in (report, checkpoint, durable):
+            require_architecture(item.get("architecture", {}), temporal=temporal)
+        for rank, (train, val) in enumerate(zip(ranks, validation, strict=True)):
+            for row in (train, val):
+                require_architecture(row.get("architecture", {}), temporal=temporal)
+                if (
+                    row.get("rank") != rank
+                    or row.get("world_size") != 4
+                    or row.get("optimizer_steps") != steps
+                    or row.get("ema_updates") != steps
+                    or row.get("frozen_index_sha256") != expected_index_sha256
+                ):
+                    raise ValueError("Rank topology, progress or frozen corpus mismatch")
+            if (
+                train.get("global_batch") != 64
+                or train.get("data_worker_start_method") != "spawn"
+                or train.get("workers_per_rank") != 1
+                or train.get("online_weights_changed") is not True
+                or train.get("all_model_parameters_finite") is not True
+                or train.get("cache_refills_observed_after_warmup") is not True
+                or train["rank_cache_at_train_end"]["verified_files"]
+                <= train["rank_cache_at_warmup"]["verified_files"]
+                or val.get("clips") != used_clips // 4
+                or val.get("global_used_clips") != used_clips
+                or val.get("global_excluded_tail_clips") != validation_clips - used_clips
+                or not val.get("metrics")
+                or any(not math.isfinite(value) for value in val["metrics"].values())
+            ):
+                raise ValueError("Rank lacks finite updates, cache refill or full validation")
+            if temporal:
+                samples = train.get("temporal_training_samples", [])
+                if not samples or samples[0].get("optimizer_step") != 1:
+                    raise ValueError("Temporal training loss evidence is missing")
+                for sample in samples:
+                    if not 1 <= sample.get("optimizer_step", 0) <= steps:
+                        raise ValueError("Temporal training sample is outside the probe")
+                    temporal_loss_metrics(
+                        {f"train/{key}_step": value for key, value in sample["metrics"].items()},
+                        stage="train",
+                    )
+                temporal_loss_metrics(val["metrics"], stage="val")
+    except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as error:
         raise ValueError(
-            "Production requires a successful four-GPU streaming probe with one spawn worker/rank"
-        )
+            "Production requires a matching successful four-GPU streaming probe: " + str(error)
+        ) from error
     return file_sha256(path)
 
 
@@ -180,7 +252,16 @@ def make_config(plan: dict):
 
     with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
         cfg = compose(
-            config_name="train", overrides=["experiment=audioset_h100_four", "data=sharded_audio"]
+            config_name="train",
+            overrides=[
+                "experiment="
+                + (
+                    "audioset_temporal_h100_four"
+                    if plan.get("temporal", False)
+                    else "audioset_h100_four"
+                ),
+                "data=sharded_audio",
+            ],
         )
     OmegaConf.set_struct(cfg, False)
     work, output = Path(plan["work_dir"]), Path(plan["output"])
@@ -188,7 +269,15 @@ def make_config(plan: dict):
     cfg.paths.output_dir = str(work / "run")
     cfg.paths.log_dir = str(work / "logs")
     cfg.extras = dict(ignore_warnings=False, enforce_tags=False, print_config=False)
-    cfg.logger = None
+    cfg.logger = {
+        "csv": {
+            "_target_": "lightning.pytorch.loggers.csv_logs.CSVLogger",
+            "save_dir": str(output / "metrics"),
+            "name": "training",
+            "version": "",
+            "flush_logs_every_n_steps": 50,
+        }
+    }
     cfg.callbacks = {
         "timer": {
             "_target_": "scripts.segment_checkpoint.SegmentTimer",
@@ -254,7 +343,7 @@ def worker(plan_path: Path):
     plan = json.loads(plan_path.read_text())
     if int(os.environ.get("WORLD_SIZE", "0")) != 4:
         raise ValueError("Training segment requires exactly four externally launched ranks")
-    _, objects = train(make_config(plan))
+    metrics, objects = train(make_config(plan))
     trainer, model = objects["trainer"], objects["model"]
     step = trainer.global_step
     if step <= plan["resume_step"] or int(model.ema_updates) != step:
@@ -273,6 +362,12 @@ def worker(plan_path: Path):
                 "final_optimizer_step": step,
                 "ema_updates": int(model.ema_updates),
                 "global_batch": 64,
+                "model_variant": plan["model_variant"],
+                "final_metrics": {
+                    key: float(value)
+                    for key, value in metrics.items()
+                    if not hasattr(value, "numel") or value.numel() == 1
+                },
                 "stream_positions_checkpointed": False,
                 "stream_restarted_on_resume": plan["resume_path"] is not None,
                 "data_seed_policy": "base_plus_resume_step",
@@ -406,7 +501,11 @@ def execute_segment(args):
         )
     if not args.streaming_smoke_report:
         raise ValueError("A successful streaming hardware report is required before launch")
-    smoke_sha = verify_streaming_report(args.streaming_smoke_report)
+    smoke_sha = verify_streaming_report(
+        args.streaming_smoke_report,
+        expected_index_sha256=args.index_sha256,
+        temporal=args.temporal,
+    )
     started = args.execute_started
     hard_deadline = started + budget.seconds
     training_deadline = hard_deadline - budget.finalization_reserve_seconds
@@ -442,6 +541,8 @@ def execute_segment(args):
     check()
     plan = {
         "segment_id": args.segment_id,
+        "temporal": args.temporal,
+        "model_variant": "temporal_aggregation" if args.temporal else "pointwise",
         "work_dir": str(args.work_dir.resolve()),
         "output": str(args.output.resolve()),
         "repository_options": repository_options | {"endpoint": args.checkpoint_endpoint},
@@ -510,6 +611,11 @@ def main(argv=None):
     parser.add_argument("--worker-plan", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--execute-started", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument(
+        "--temporal",
+        action="store_true",
+        help="Use the tested temporal aggregation model; omit for the pointwise baseline",
+    )
     parser.add_argument("--segment-hours", type=float, default=10)
     parser.add_argument("--budget-usd", type=float)
     parser.add_argument("--maximum-rate-usd-per-hour", type=float)
