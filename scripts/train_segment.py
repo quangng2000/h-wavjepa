@@ -52,9 +52,9 @@ class SegmentBudget:
             )
         if self.segment_hours > 11.5:
             raise ValueError("Segments must be <=11.5 hours, leaving room within a 12-hour job cap")
-        if self.finalization_reserve_seconds < self.transfer_timeout_seconds + 120:
+        if self.finalization_reserve_seconds < 2 * self.transfer_timeout_seconds + 120:
             raise ValueError(
-                "Reserve must cover checkpoint transfer plus validation/serialization/exit"
+                "Reserve must cover pending and final checkpoint transfers plus validation/serialization/exit"
             )
         if self.finalization_reserve_seconds >= self.seconds:
             raise ValueError("Finalization reserve leaves no training time")
@@ -501,15 +501,20 @@ def make_config(plan: dict):
             "receipt_path": str(output / "latest-checkpoint.json"),
             "transfer_timeout_seconds": plan["budget"]["transfer_timeout_seconds"],
             "hard_deadline": plan["hard_deadline"],
-            "dirpath": str(work / "run" / "checkpoints"),
+            # Keep one full-state recovery file in the platform's captured output
+            # even when private-S3 publication fails; the large input cache stays
+            # in work_dir and never enters the output artifact.
+            "dirpath": str(output / "checkpoints"),
             "filename": "step_{step:07d}",
             "auto_insert_metric_name": False,
             "every_n_train_steps": plan["checkpoint_every_steps"],
             "first_checkpoint_step": 250,
+            "async_upload": True,
         },
         "progress": {
             "_target_": "scripts.training_progress.TrainingProgress",
             "every_n_steps": 100,
+            "all_ranks": True,
         },
     }
     if plan.get("nat_readiness"):
@@ -545,8 +550,8 @@ def make_config(plan: dict):
     cfg.trainer.num_sanity_val_steps = 0
     cfg.trainer.limit_val_batches = 1.0
     cfg.trainer.enable_model_summary = False
-    # Peers wait in a collective while rank zero verifies the durable upload.
-    # Raise only segment runs' timeout, preserving any longer preset timeout.
+    # Retain the conservative checkpoint-aware timeout for final serialization
+    # and synchronous compatibility; async upload polls use short collectives.
     cfg.trainer.strategy.timeout = {
         "_target_": "datetime.timedelta",
         "seconds": max(

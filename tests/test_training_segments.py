@@ -443,7 +443,10 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     assert cfg.seed == 42 and cfg.data.seed == 1042
     assert list(cfg.callbacks) == ["timer", "model_checkpoint", "progress"]
     assert cfg.callbacks.model_checkpoint.first_checkpoint_step == 250
+    assert cfg.callbacks.model_checkpoint.async_upload is True
+    assert cfg.callbacks.model_checkpoint.dirpath == str(tmp_path / "output" / "checkpoints")
     assert cfg.callbacks.progress.every_n_steps == 100
+    assert cfg.callbacks.progress.all_ranks is True
     assert cfg.data.download_timeout_seconds == 300
     assert cfg.data.worker_timeout_seconds == 360
     assert cfg.data.worker_timeout_seconds < cfg.trainer.strategy.timeout.seconds

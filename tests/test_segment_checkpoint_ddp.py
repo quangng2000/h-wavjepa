@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 from lightning.pytorch.strategies import DDPStrategy
 
 from scripts.segment_checkpoint import DurableStepCheckpoint
+from src.utils.runtime import file_sha256
 
 
 class DelayedPublication(DurableStepCheckpoint):
@@ -31,7 +32,10 @@ class DelayedPublication(DurableStepCheckpoint):
         time.sleep(0.2)
         if self.fail:
             raise TimeoutError("private-storage-url-with-secret-fixture")
-        receipt = {"checkpoint": {"step": step}, "verified": True}
+        receipt = {
+            "checkpoint": {"step": step, "sha256": file_sha256(path), "bytes": path.stat().st_size},
+            "verified": True,
+        }
         self.receipt_path.write_text(json.dumps(receipt))
         return receipt
 
@@ -114,7 +118,15 @@ def test_delayed_checkpoint_publication_broadcasts_success_and_timeout_to_both_r
                 process.kill()
                 process.join(timeout=5)
 
-    expected_receipt = {"checkpoint": {"step": 1}, "verified": True}
+    checkpoint = tmp_path / "success.ckpt"
+    expected_receipt = {
+        "checkpoint": {
+            "step": 1,
+            "sha256": file_sha256(checkpoint),
+            "bytes": checkpoint.stat().st_size,
+        },
+        "verified": True,
+    }
     reports = [json.loads((tmp_path / f"rank-{rank}.json").read_text()) for rank in (0, 1)]
     for rank, (success, failure) in enumerate(reports):
         assert success["receipt"] == expected_receipt

@@ -14,6 +14,7 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -66,11 +67,12 @@ def checkpoint_client(endpoint: str):
         config=Config(
             signature_version="s3v4",
             connect_timeout=10,
-            read_timeout=20,
+            read_timeout=60,
             retries={"max_attempts": 2},
             s3={"addressing_style": "path"},
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
+            max_pool_connections=16,
         ),
     )
 
@@ -97,6 +99,7 @@ class CheckpointRepository:
         naturalistic_manifest_sha256: str | None = None,
         clean_binaural: bool = False,
         curriculum_source: dict | None = None,
+        managed_upload: bool = False,
     ):
         if not RUN_ID.fullmatch(run_id) or not SHA.fullmatch(index_sha256):
             raise ValueError("Expected a stable run ID and frozen index SHA256")
@@ -134,7 +137,12 @@ class CheckpointRepository:
             raise ValueError("Owned prefix must have at least two components and end in run_id")
         if not bucket or "/" in bucket:
             raise ValueError("Expected a private checkpoint bucket name")
-        self.store = Store(client, bucket, check)
+        if managed_upload:
+            from scripts.checkpoint_transfer import ManagedCheckpointStore
+
+            self.store = ManagedCheckpointStore(client, bucket, check)
+        else:
+            self.store = Store(client, bucket, check)
         self.prefix, self.run_id, self.index_sha256 = prefix, run_id, index_sha256
         self.base_data_seed = base_data_seed
         self.owner = {
@@ -393,12 +401,13 @@ class SegmentTimer(Timer):
 
 
 class DurableStepCheckpoint(StepCheckpoint):
-    """Save with Lightning, then synchronously verify private-S3 durability.
+    """Save full local state, then verify private-S3 durability.
 
-    Synchronous publication is intentionally simple: no checkpoint file can be
-    replaced or pruned while its bytes are still uploading. All DDP ranks wait
-    for rank zero's result, and all raise if publication fails. Their collective
-    timeout must also cover the transfer budget and its completion margin.
+    Optional background publication overlaps storage I/O with training. At most
+    one immutable step file is pending: periodic saves are skipped until it has
+    finished, so Lightning cannot prune its upload source. All ranks poll the
+    same short collective each batch; publication failures stop every rank.
+    Final saves are drained before validation and successful fit completion.
     """
 
     def __init__(
@@ -410,6 +419,7 @@ class DurableStepCheckpoint(StepCheckpoint):
         transfer_timeout_seconds: float,
         hard_deadline: float,
         first_checkpoint_step: int | None = None,
+        async_upload: bool = False,
         **kwargs,
     ):
         if first_checkpoint_step is not None and (
@@ -417,6 +427,8 @@ class DurableStepCheckpoint(StepCheckpoint):
         ):
             raise ValueError("first_checkpoint_step must be a positive integer or None")
         super().__init__(**kwargs)
+        if type(async_upload) is not bool:
+            raise ValueError("async_upload must be a boolean")
         minimum_checkpoint_collective_timeout(transfer_timeout_seconds)
         self.repository_options = dict(repository_options)
         self.segment_id, self.receipt_path = segment_id, Path(receipt_path)
@@ -424,6 +436,10 @@ class DurableStepCheckpoint(StepCheckpoint):
         self.transfer_timeout_seconds, self.hard_deadline = transfer_timeout_seconds, hard_deadline
         self.first_checkpoint_step = first_checkpoint_step
         self.last_receipt = None
+        self.async_upload = async_upload
+        self._executor = None
+        self._publication = None
+        self._pending_step = None
 
     def setup(self, trainer, pl_module, stage):
         if isinstance(trainer.strategy, DDPStrategy):
@@ -447,6 +463,7 @@ class DurableStepCheckpoint(StepCheckpoint):
 
         check()
         options = dict(self.repository_options)
+        options.setdefault("managed_upload", self.async_upload)
         client = checkpoint_client(options.pop("endpoint"))
         repository = CheckpointRepository(client, **options, check=check)
         receipt = repository.publish(
@@ -456,19 +473,53 @@ class DurableStepCheckpoint(StepCheckpoint):
         return receipt
 
     def _save_checkpoint(self, trainer, filepath):
+        if self.async_upload and self._pending_step is not None:
+            raise RuntimeError("Cannot replace an in-flight checkpoint")
         super()._save_checkpoint(trainer, filepath)
         outcome = None
         if trainer.is_global_zero:
             try:
-                outcome = {"receipt": self._publish(Path(filepath), trainer.global_step)}
+                step = int(trainer.global_step)
+                if self.async_upload:
+                    if self._executor is None:
+                        self._executor = ThreadPoolExecutor(
+                            max_workers=1, thread_name_prefix="checkpoint-publisher"
+                        )
+                    # Only an already serialized file and scalar step cross the
+                    # thread boundary; no live model, optimizer or trainer does.
+                    self._publication = self._executor.submit(self._publish, Path(filepath), step)
+                    outcome = {"pending_step": step}
+                    print(
+                        json.dumps(
+                            {
+                                "event": "checkpoint_upload_started",
+                                "step": step,
+                                "bytes": Path(filepath).stat().st_size,
+                            },
+                            allow_nan=False,
+                        ),
+                        flush=True,
+                    )
+                else:
+                    outcome = {"receipt": self._publish(Path(filepath), step)}
             except Exception as error:
                 # Avoid printing SDK exception messages: they can contain URLs.
                 outcome = {"error": type(error).__name__}
         outcome = trainer.strategy.broadcast(outcome)
+        self._accept_publication(trainer, outcome)
+
+    def _accept_publication(self, trainer, outcome):
         if "error" in outcome:
             raise RuntimeError(
                 f"Durable checkpoint publication failed ({outcome['error']}); stopping"
             )
+        if "pending_step" in outcome:
+            self._pending_step = outcome["pending_step"]
+            return
+        if "receipt" not in outcome:
+            return
+        self._publication = None
+        self._pending_step = None
         self.last_receipt = outcome["receipt"]
         if trainer.is_global_zero:
             record = self.last_receipt["checkpoint"]
@@ -485,17 +536,88 @@ class DurableStepCheckpoint(StepCheckpoint):
                 flush=True,
             )
 
+    def _poll_publication(self, trainer):
+        """One identical collective on all ranks, even when no upload is active."""
+        outcome = None
+        if trainer.is_global_zero:
+            outcome = {}
+            if self._publication is not None and self._publication.done():
+                try:
+                    outcome = {"receipt": self._publication.result()}
+                except Exception as error:
+                    outcome = {"error": type(error).__name__}
+        self._accept_publication(trainer, trainer.strategy.broadcast(outcome))
+
+    def _drain_publication(self, trainer):
+        # Keep each collective short even at finalization. The worker's transfer
+        # deadline bounds storage work; peers never sit inside one long broadcast.
+        while self._pending_step is not None:
+            self._poll_publication(trainer)
+            if self._pending_step is not None:
+                time.sleep(0.05)
+
+    def _assert_final_receipt(self, trainer):
+        if trainer.global_step > 0 and (
+            self.last_receipt is None
+            or self.last_receipt["checkpoint"]["step"] != trainer.global_step
+        ):
+            raise RuntimeError("Final optimizer step lacks a verified durable checkpoint")
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        final_step = trainer.should_stop or (
+            trainer.max_steps > 0 and trainer.global_step >= trainer.max_steps
+        )
+        if self.async_upload:
+            self._poll_publication(trainer)
+            if final_step:
+                self._drain_publication(trainer)
+            elif self._pending_step is not None:
+                # Backpressure is a skipped intermediate snapshot, never an
+                # unbounded queue or deletion of bytes still being uploaded.
+                return
         super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
         # Lightning may run full validation after Timer requests a stop. Make
         # this optimizer step durable BEFORE that tail consumes the reserve.
         # An optional early save protects the first shard refill without making
         # every later publication equally frequent. Normal cadence wins ties.
         if (
-            (trainer.should_stop or trainer.global_step == self.first_checkpoint_step)
+            (final_step or trainer.global_step == self.first_checkpoint_step)
             and trainer.global_step > 0
             and self._last_global_step_saved != trainer.global_step
         ):
             candidates = self._monitor_candidates(trainer)
             self._save_topk_checkpoint(trainer, candidates)
             self._save_last_checkpoint(trainer, candidates)
+        if self.async_upload and final_step:
+            self._drain_publication(trainer)
+            self._assert_final_receipt(trainer)
+
+    def on_train_end(self, trainer, pl_module):
+        if self.async_upload:
+            self._drain_publication(trainer)
+        super().on_train_end(trainer, pl_module)
+        if self.async_upload:
+            self._drain_publication(trainer)
+            self._assert_final_receipt(trainer)
+
+    def on_fit_end(self, trainer, pl_module):
+        if self.async_upload:
+            self._drain_publication(trainer)
+            self._assert_final_receipt(trainer)
+        super().on_fit_end(trainer, pl_module)
+
+    def teardown(self, trainer, pl_module, stage):
+        # on_train_end/on_fit_end already propagated the verified outcome.
+        self._shutdown_publisher()
+        super().teardown(trainer, pl_module, stage)
+
+    def on_exception(self, trainer, pl_module, exception):
+        # Lightning skips callback.teardown on exceptions. Other ranks may have
+        # exited, so drain only this process's I/O thread without any collective.
+        self._shutdown_publisher()
+        super().on_exception(trainer, pl_module, exception)
+
+    def _shutdown_publisher(self):
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None

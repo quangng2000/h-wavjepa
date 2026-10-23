@@ -5,6 +5,16 @@ behavior, not improved representation quality or reproduced benchmark scores.
 
 ## Nat integration, 23 October 2026
 
+The subsequent four-H100 attempt initialized all four ranks and reached its early
+checkpoint, but its single-PUT publication exceeded 600 seconds. No verified
+checkpoint was published. Recovery uses official boto3 concurrent multipart
+uploads, a bounded background publisher, and a full local recovery file in the
+captured output. **151 focused tests passed**, including real SDK multipart/abort
+requests against a local HTTP fixture, full-state retention, and two-rank Gloo
+progress during an upload and consistent error propagation. A live 16 MiB
+multipart upload took 2.00 seconds and passed complete checksum readback in 3.76
+seconds total; this small storage check does not establish full checkpoint speed.
+
 The first clean-binaural production attempt reached backward passes but failed
 on the 120-second AudioSet shard download deadline before its first durable
 checkpoint. Recovery adds ranged retries under one 300-second deadline, a

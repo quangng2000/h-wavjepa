@@ -74,6 +74,21 @@ def test_nonzero_ranks_do_not_report_progress(capsys):
     assert not capsys.readouterr().out
 
 
+def test_opt_in_reports_nonzero_rank_optimizer_progress(monkeypatch, capsys):
+    clock = iter([0.0, 2.0])
+    monkeypatch.setattr("scripts.training_progress.time.monotonic", lambda: next(clock))
+    callback = TrainingProgress(every_n_steps=100, all_ranks=True)
+    trainer = trainer_state(is_global_zero=False, global_rank=3, world_size=4)
+    callback.on_train_start(trainer, None)
+    trainer.global_step = 100
+    callback.on_train_batch_end(trainer, None, None, None, 0)
+    record = json.loads(capsys.readouterr().out)
+    assert record["event"] == "training_rank_progress"
+    assert record["rank"] == 3
+    assert record["world_size"] == 4
+    assert record["global_step"] == 100
+
+
 @pytest.mark.parametrize("interval", [0, -1, 1.5, True])
 def test_progress_rejects_invalid_interval(interval):
     with pytest.raises(ValueError, match="positive integer"):

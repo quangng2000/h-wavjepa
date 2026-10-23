@@ -56,14 +56,18 @@ owned process tree, including torchrun's detached rank sessions, before the
 requested segment duration; the platform cap remains the final backstop.
 Segments may be at most 11.5 hours. Defaults reserve the last
 **30 minutes** for finalization and limit each checkpoint publication to **10
-minutes**. These margins are conservative inputs, not measured full-corpus
+minutes**. The reserve must cover two transfer budgets plus 120 seconds, because
+a final stop can drain an older upload before publishing the final state.
+These margins are conservative inputs, not measured full-corpus
 validation or checkpoint upload durations. Measure the upload plus full readback
 and validation tail before treating them as sufficient for production.
 
 Segment runs raise the DDP collective timeout to at least the transfer budget
 plus **120 seconds**: **720 seconds** with the default 600-second transfer budget.
-This lets peers wait for rank zero's publication result; a longer preset timeout
-is preserved. Ordinary H100 runs retain their 180-second timeout. The durable
+Production uploads run in a background thread; ranks poll the result through short
+collectives while training continues. The conservative timeout also supports the
+synchronous callback mode, and a longer preset timeout is preserved.
+Ordinary H100 runs retain their 180-second timeout. The durable
 callback rejects a shorter timeout at setup, including outside the segment runner.
 The transfer deadline is checked cooperatively around SDK operations; the extra
 time allows an in-flight request and the result broadcast to finish. It is not
@@ -101,7 +105,8 @@ Git, logs, images, and receipt files. The launch below uses placeholders only.
 Run the supervisor once, rather than wrapping it in `torchrun`; it launches four
 ranks itself. Both output and working directories must be new for each segment.
 Put the working directory outside the platform's automatically collected output
-directory so cached shards and large local checkpoints are not exported twice.
+directory so cached shards are not exported. One latest full local checkpoint
+and its symlink are retained under `<output>/checkpoints/` for failure recovery.
 
 ```bash
 python -u scripts/train_segment.py --temporal \
@@ -188,13 +193,18 @@ model seed or LR/EMA schedule; it does not provide sample-exact continuity.
 ## Durable handoff and failure behavior
 
 The production runner first saves at update 250, then every 5,000 updates and at
-a normal final stop. Lightning writes a full local checkpoint. Rank zero uploads it under an immutable step/SHA256 key, reads back
+a normal final stop. Lightning writes a full local checkpoint. Rank zero's
+background publisher uses boto3 multipart transfers (eight 8 MiB parts in flight)
+under an immutable step/SHA256 key, reads back
 the **complete object**, verifies its SHA256 and byte count, then publishes and
-verifies `latest.json`. All ranks wait for this result. A Timer stop captures the
-final optimizer step before Lightning starts its final validation pass.
+verifies `latest.json`. All ranks continue training during publication. Only one
+upload is allowed at once; intermediate saves are skipped while its source file
+is in use. A Timer stop drains the pending upload and captures the final optimizer
+step before Lightning starts its final validation pass.
 
-Rank zero prints compact progress every 100 optimizer steps, including scalar
-loss and the observed interval update rate. A separate publication record appears
+Each rank prints compact progress every 100 optimizer steps, including its rank,
+scalar loss and observed interval update rate. Upload phases report bytes and
+elapsed time. A separate publication record appears
 only after a checkpoint has passed complete remote verification.
 
 Production shard reads share a 300-second total deadline across at most three
@@ -210,14 +220,17 @@ only validated checkpoint keys in that prefix and refuses foreign objects. This
 is an exclusive-writer protocol, not a conditional-write lock.
 
 Upload, readback, receipt, or ownership failure stops the run with a nonzero exit.
-The previous durable checkpoint remains available; failure never triggers an
+The previous durable checkpoint remains available, and the current complete local
+file remains under `<output>/checkpoints/` for normal failed-job artifact capture.
+That recovery file is not a verified S3 receipt or an automatic resume source.
+Failure never triggers an
 automatic fallback or restart. A hard kill may lose work since the last verified
 checkpoint. Inspect `latest.json` and download verification before retrying after
 an ambiguous upload result. There are no platform checkpoint POST/yield calls.
 
 Loss curves and temporal diagnostics are flushed to small CSV files beneath
-`<output>/metrics/training/`; cached audio and full checkpoints remain in the
-separate working directory. The final receipt includes the model variant and
+`<output>/metrics/training/`; cached audio remains in the separate working
+directory. The final receipt includes the model variant and
 final scalar metrics.
 
 Small local records are `segment-plan.json`, `latest-checkpoint.json`, optional
