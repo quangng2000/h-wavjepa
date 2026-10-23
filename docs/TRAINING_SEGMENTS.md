@@ -192,8 +192,9 @@ model seed or LR/EMA schedule; it does not provide sample-exact continuity.
 
 ## Durable handoff and failure behavior
 
-The production runner first saves at update 250, then every 5,000 updates and at
-a normal final stop. Lightning writes a full local checkpoint. Rank zero's
+The production runner saves within 250 updates of each segment's starting step,
+then every 5,000 absolute updates and at a normal final stop. Lightning writes a
+full local checkpoint. Rank zero's
 background publisher uses boto3 multipart transfers (eight 8 MiB parts in flight)
 under an immutable step/SHA256 key, reads back
 the **complete object**, verifies its SHA256 and byte count, then publishes and
@@ -227,6 +228,26 @@ Failure never triggers an
 automatic fallback or restart. A hard kill may lose work since the last verified
 checkpoint. Inspect `latest.json` and download verification before retrying after
 an ambiguous upload result. There are no platform checkpoint POST/yield calls.
+
+For a captured clean-binaural checkpoint, `scripts/recover_training_checkpoint.py`
+can verify and publish it on CPU before another GPU launch. Pin the capture's
+SHA256 and byte count, inject its private URL through
+`HWAVJEPA_RECOVERY_ARTIFACT_URL`, and provide the separate checkpoint credentials
+above. Keep the temporary work directory outside captured output:
+
+```bash
+python scripts/recover_training_checkpoint.py \
+  --artifact-sha256 '<CAPTURE_SHA256>' --artifact-bytes '<CAPTURE_BYTES>' \
+  --checkpoint-step 250 --output /output/recovery \
+  --work-dir /workspace/checkpoint-recovery --timeout-seconds 1740
+```
+
+Recovery requires the original owned prefix, complete optimizer/EMA/scheduler
+state, and a strict finite model load. It never adopts another run or accepts a
+partial checkpoint. Only full remote readback and a verified latest receipt
+produce `recovery-success.json`; subsequent GPU segments still require explicit
+`--resume`. Failed transfers log sanitized SDK operation, error code, HTTP status
+and exception classes, without credential-bearing URLs or exception messages.
 
 Loss curves and temporal diagnostics are flushed to small CSV files beneath
 `<output>/metrics/training/`; cached audio remains in the separate working

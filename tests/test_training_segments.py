@@ -420,6 +420,7 @@ def plan(tmp_path):
         "checkpoint_every_steps": 5000,
         "data_endpoint": "https://storage.givemeanode.com",
         "resume_path": "/tmp/verified-resume.ckpt",
+        "resume_step": 1000,
         "resolved_data_seed": 1042,
     }
 
@@ -442,7 +443,7 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     assert cfg.ckpt_path == "/tmp/verified-resume.ckpt"
     assert cfg.seed == 42 and cfg.data.seed == 1042
     assert list(cfg.callbacks) == ["timer", "model_checkpoint", "progress"]
-    assert cfg.callbacks.model_checkpoint.first_checkpoint_step == 250
+    assert cfg.callbacks.model_checkpoint.first_checkpoint_step == 1250
     assert cfg.callbacks.model_checkpoint.async_upload is True
     assert cfg.callbacks.model_checkpoint.dirpath == str(tmp_path / "output" / "checkpoints")
     assert cfg.callbacks.progress.every_n_steps == 100
@@ -458,6 +459,20 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     logger.save()
     assert "temporal_variance_loss" in (Path(logger.log_dir) / "metrics.csv").read_text()
     assert cfg.model.backbone.config.compact_masked_tokens is True
+
+
+@pytest.mark.parametrize(
+    ("resume_step", "first_checkpoint_step"),
+    [(0, 250), (250, 500), (4750, 5000), (374900, 375000), (374999, 375000)],
+)
+def test_clean_segment_checks_publication_early_after_resume(
+    tmp_path, resume_step, first_checkpoint_step
+):
+    cfg = make_config(plan(tmp_path) | {"clean_binaural": True, "resume_step": resume_step})
+    assert cfg.callbacks.model_checkpoint.first_checkpoint_step == first_checkpoint_step
+    assert resume_step < first_checkpoint_step <= cfg.trainer.max_steps
+    assert cfg.callbacks.model_checkpoint.every_n_train_steps == 5000
+    assert cfg.trainer.max_steps == cfg.model.lr_total_steps == 375000
 
 
 @pytest.mark.parametrize(

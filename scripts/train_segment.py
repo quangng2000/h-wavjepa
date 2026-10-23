@@ -508,7 +508,9 @@ def make_config(plan: dict):
             "filename": "step_{step:07d}",
             "auto_insert_metric_name": False,
             "every_n_train_steps": plan["checkpoint_every_steps"],
-            "first_checkpoint_step": 250,
+            # Recheck durable publication early in every segment, including a
+            # resume whose original step-250 checkpoint is already behind it.
+            "first_checkpoint_step": min(plan.get("resume_step", 0) + 250, 375000),
             "async_upload": True,
         },
         "progress": {

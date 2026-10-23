@@ -11,8 +11,13 @@ from urllib.parse import parse_qs, urlsplit
 import boto3
 import pytest
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
-from scripts.checkpoint_transfer import ManagedCheckpointStore, _UploadProgress
+from scripts.checkpoint_transfer import (
+    ManagedCheckpointStore,
+    _UploadProgress,
+    safe_exception_details,
+)
 
 
 @pytest.fixture
@@ -26,6 +31,7 @@ def gateway():
         "aborted": 0,
         "readbacks": 0,
         "fail_parts": False,
+        "fail_complete": False,
         "corrupt_readback": False,
     }
     lock = threading.Lock()
@@ -80,6 +86,14 @@ def gateway():
                     b"</InitiateMultipartUploadResult>",
                 )
             else:
+                if state["fail_complete"]:
+                    self.respond(
+                        400,
+                        b"<Error><Code>InvalidPart</Code>"
+                        b"<Message>https://private.example/secret-key?token=secret</Message>"
+                        b"</Error>",
+                    )
+                    return
                 root = ET.fromstring(body)
                 numbers = [
                     int(node.text)
@@ -226,7 +240,7 @@ def test_deadline_in_sdk_body_callback_aborts_multipart(gateway, checkpoint):
     assert path.exists()
 
 
-def test_sdk_part_failure_aborts_and_exposes_only_safe_error(gateway, checkpoint):
+def test_sdk_part_failure_aborts_and_exposes_only_safe_error(gateway, checkpoint, capsys):
     client, state = gateway
     path, digest = checkpoint
     state["fail_parts"] = True
@@ -237,6 +251,75 @@ def test_sdk_part_failure_aborts_and_exposes_only_safe_error(gateway, checkpoint
     assert state["created"] == state["aborted"] == 1
     assert state["completed"] == 0
     assert not state["objects"]
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "checkpoint_transfer_failed"
+    assert event["transfer_stage"] == "upload"
+    assert event["last_transfer_operation"] == "UploadPart"
+    assert event["operation_name"] == "UploadPart"
+    assert event["error_code"] == "InternalError"
+    assert event["http_status"] == 500
+    assert event["exception_chain"] == ["RuntimeError", "S3UploadFailedError", "ClientError"]
+    assert event["operation_trace"][-1] == "AbortMultipartUpload"
+
+
+def test_completion_failure_diagnostics_preserve_operation_after_abort(gateway, checkpoint, capsys):
+    client, state = gateway
+    path, digest = checkpoint
+    state["fail_complete"] = True
+    store = ManagedCheckpointStore(client, "checkpoint-fixture", lambda: None)
+    with pytest.raises(RuntimeError):
+        store.put_file("step.ckpt", path, digest)
+    assert state["created"] == state["aborted"] == 1
+    assert state["completed"] == 0
+    output = capsys.readouterr().out
+    event = json.loads(output.splitlines()[-1])
+    assert event["operation_name"] == "CompleteMultipartUpload"
+    assert event["last_transfer_operation"] == "CompleteMultipartUpload"
+    assert event["error_code"] == "InvalidPart"
+    assert event["http_status"] == 400
+    assert event["operation_trace"][-2:] == ["CompleteMultipartUpload", "AbortMultipartUpload"]
+    assert event["bytes"] == path.stat().st_size
+    for private in ("https://", "private.example", "secret-key", "token=secret", "step.ckpt"):
+        assert private not in output
+
+
+def test_safe_exception_details_traverse_cause_and_context_without_messages():
+    private = "https://private.example/secret-key?token=secret"
+    sdk_error = ClientError(
+        {
+            "Error": {"Code": "SlowDown", "Message": private, "Key": private},
+            "ResponseMetadata": {
+                "HTTPStatusCode": 503,
+                "RequestId": private,
+                "HTTPHeaders": {"authorization": private},
+            },
+        },
+        "CompleteMultipartUpload",
+    )
+    wrapper = RuntimeError(private)
+    wrapper.__context__ = sdk_error
+    cause = ValueError(private)
+    wrapper.__cause__ = cause
+    # Cycles can appear in hand-built or re-raised exception chains.
+    cause.__context__ = wrapper
+    details = safe_exception_details(wrapper)
+    assert details["exception_chain"] == ["RuntimeError", "ValueError", "ClientError"]
+    assert details["sdk_errors"] == [
+        {"operation_name": "CompleteMultipartUpload", "error_code": "SlowDown", "http_status": 503}
+    ]
+    assert private not in json.dumps(details)
+
+
+def test_safe_exception_details_reject_unstructured_sdk_fields():
+    private = "https://private.example/secret-key?token=secret"
+    error = ClientError(
+        {
+            "Error": {"Code": private, "Message": private},
+            "ResponseMetadata": {"HTTPStatusCode": private},
+        },
+        private,
+    )
+    assert safe_exception_details(error) == {"exception_chain": ["ClientError"], "sdk_errors": []}
 
 
 def test_progress_serializes_worker_updates_and_retry_corrections(capsys):
