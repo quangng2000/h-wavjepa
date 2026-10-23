@@ -6,6 +6,8 @@ import io
 import json
 import shutil
 import sqlite3
+import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -352,6 +354,7 @@ def test_bounds_leave_partial_without_publishing_manifest(factory, monkeypatch):
         stager.run()
     assert (stager.scratch / source["id"]).exists()
     assert stager.status("partial")["completed_components"] == 0
+    stager.cancelled.clear()
     stager.deadline = 0
     with pytest.raises(PreparationLimit, match="runtime"):
         stager.check()
@@ -442,3 +445,181 @@ def test_final_assembly_remote_route_checks_receipts_without_local_payloads(fact
             allow_pilot=True,
             _remote_verifier=stager.verify_enrolled,
         )
+
+
+def two_sources(stager, monkeypatch):
+    first = install_source_fixture(stager, monkeypatch)
+    second = {**first, "id": "shard-000001", "path": "train/webdataset_output/shard-000001.tar"}
+    stager.sources = [first, second]
+    return first, second
+
+
+def test_pipeline_prepares_next_source_during_upload_and_keeps_ledger_on_main(factory, monkeypatch):
+    stager = factory()
+    first, second = two_sources(stager, monkeypatch)
+    prepare, publish = stager._prepare_source, stager._publish_source
+    uploading, prepared_next = threading.Event(), threading.Event()
+    main_thread = threading.get_ident()
+    active_counts = []
+
+    def producer(source):
+        assert threading.get_ident() != main_thread
+        active_counts.append(len(stager.reservations))
+        if source["id"] == second["id"]:
+            assert uploading.wait(5), "next preparation did not overlap current upload"
+        result = prepare(source)
+        if source["id"] == second["id"]:
+            prepared_next.set()
+        return result
+
+    def consumer(prepared):
+        assert threading.get_ident() == main_thread
+        if prepared["source"]["id"] == first["id"]:
+            uploading.set()
+            assert prepared_next.wait(5), "consumer blocked the producer"
+        return publish(prepared)
+
+    monkeypatch.setattr(stager, "_prepare_source", producer)
+    monkeypatch.setattr(stager, "_publish_source", consumer)
+    assert stager.run()["completed_components"] == 2
+    assert active_counts == [1, 2]
+    assert stager.reservations == {}
+
+
+@pytest.mark.parametrize(
+    "options", [{"prefetch_sources": 0}, {"max_scratch_bytes": 7 * 1024**3 // 2}]
+)
+def test_pipeline_can_run_sequentially_or_fall_back_for_small_disk(factory, monkeypatch, options):
+    stager = factory(**options)
+    first, second = two_sources(stager, monkeypatch)
+    prepare, publish = stager._prepare_source, stager._publish_source
+    first_published = threading.Event()
+
+    def producer(source):
+        assert len(stager.reservations) == 1
+        if source["id"] == second["id"]:
+            assert first_published.is_set()
+        return prepare(source)
+
+    def consumer(prepared):
+        result = publish(prepared)
+        if prepared["source"]["id"] == first["id"]:
+            first_published.set()
+        return result
+
+    monkeypatch.setattr(stager, "_prepare_source", producer)
+    monkeypatch.setattr(stager, "_publish_source", consumer)
+    assert stager.run()["completed_components"] == 2
+
+
+def test_consumer_failure_cancels_background_preparation_and_preserves_scratch(
+    factory, monkeypatch
+):
+    stager = factory()
+    first, second = two_sources(stager, monkeypatch)
+    original = stager._prepare_source
+    started, stopped = threading.Event(), threading.Event()
+
+    def producer(source):
+        if source["id"] == first["id"]:
+            return original(source)
+        started.set()
+        try:
+            while not stager.cancelled.wait(0.05):
+                stager.check()
+            stager.check()
+        finally:
+            stopped.set()
+
+    def failed_upload(prepared):
+        assert started.wait(5)
+        raise ValueError("fixture upload failure")
+
+    monkeypatch.setattr(stager, "_prepare_source", producer)
+    monkeypatch.setattr(stager, "_publish_source", failed_upload)
+    with pytest.raises(ValueError, match="fixture upload"):
+        stager.run()
+    assert stopped.is_set() and not stager.reservations
+    assert (stager.scratch / first["id"] / "source.tar").exists()
+    assert stager.database.execute("SELECT count(*) FROM components").fetchone()[0] == 0
+
+
+def test_upload_refills_worker_without_waiting_for_slowest_batch_member(
+    factory, monkeypatch, tmp_path
+):
+    stager = factory(workers=2)
+    assets = {}
+    keys = []
+    for index in range(3):
+        payload = f"payload-{index}".encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        local_key = f"objects/{digest}.npz"
+        path = tmp_path / local_key
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(payload)
+        assets[str(index)] = {"key": local_key, "bytes": len(payload), "sha256": digest}
+        keys.append(f"{stager.prefix}/{local_key}")
+    third_started = threading.Event()
+    put = stager.store.put_payload
+
+    def slow_first(key, path, digest):
+        if key == keys[0]:
+            assert third_started.wait(5), "upload queue still has a batch barrier"
+        if key == keys[2]:
+            third_started.set()
+        return put(key, path, digest)
+
+    monkeypatch.setattr(stager.store, "put_payload", slow_first)
+    stager._upload({"assets": assets}, tmp_path)
+    assert stager.database.execute("SELECT count(*) FROM objects").fetchone()[0] == 3
+
+
+def test_huggingface_supervisor_promotes_one_archive_and_strips_private_environment(
+    factory, monkeypatch
+):
+    stager = factory(download_backend="huggingface")
+    source = install_source_fixture(stager, monkeypatch)
+    stager._reserve_source(source)
+    work = stager.scratch / source["id"]
+    work.mkdir()
+    archive = work / "source.tar"
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "private fixture credential")
+    monkeypatch.setenv("GMN_API_TOKEN", "private fixture token")
+    monkeypatch.setenv("HF_TOKEN", "private fixture token")
+    calls = []
+
+    def launch(arguments, **kwargs):
+        assert kwargs["start_new_session"]
+        assert not any(key.startswith(("AWS_", "GMN_", "HF_TOKEN")) for key in kwargs["env"])
+        assert kwargs["stdout"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.DEVNULL
+        destination = work / "huggingface" / source["path"]
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"archive")
+        calls.append(arguments)
+        return SimpleNamespace(poll=lambda: 0, returncode=0)
+
+    monkeypatch.setattr(staging.subprocess, "Popen", launch)
+    stager._download_brir_huggingface(source, archive)
+    proof = staging.download_source(source, archive, stager.check)
+    assert proof["sha256"] == source["sha256"]
+    assert len(calls) == 1 and not (work / "huggingface" / source["path"]).exists()
+
+
+def test_huggingface_supervisor_kills_process_group_on_cancellation(factory, monkeypatch):
+    stager = factory(download_backend="huggingface")
+    source = install_source_fixture(stager, monkeypatch)
+    stager._reserve_source(source)
+    work = stager.scratch / source["id"]
+    work.mkdir()
+    killed = []
+    process = SimpleNamespace(pid=1234, poll=lambda: None, wait=lambda timeout=None: 0)
+
+    def launch(*args, **kwargs):
+        stager.cancelled.set()
+        return process
+
+    monkeypatch.setattr(staging.subprocess, "Popen", launch)
+    monkeypatch.setattr(staging.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(PreparationLimit, match="cancelled"):
+        stager._download_brir_huggingface(source, work / "source.tar")
+    assert killed == [(1234, staging.signal.SIGTERM)]

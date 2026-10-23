@@ -349,12 +349,16 @@ mono benchmark cannot supply either number. See [bounded segments](TRAINING_SEGM
 
 ## Rolling CPU staging
 
-`src.stage_nat_assets` downloads one pinned source archive at a time, checks its
-publisher digest, and reuses the offline converter above. WHAM's published MD5
+`src.stage_nat_assets` overlaps the next pinned source's download and conversion
+with the current source's uploads. One producer and one consumer use at most two
+source directories, reserved against the total scratch limit before work starts.
+Low scratch capacity falls back to sequential preparation. It checks each
+publisher digest and reuses the offline converter above. WHAM's published MD5
 must pass before its SHA-256 is established. Every converted content-addressed
 object is uploaded with a conditional PUT and then streamed back in full to
-check its SHA-256. The S3 client limits all requests, including retries, to eight
-per second. This requires a storage endpoint that supports `If-None-Match: *`.
+check its SHA-256. The S3 client limits all requests, including retries, to nine
+per second (below the provider's 600-request/minute key limit). Eight upload
+workers refill continuously; a slow object does not block the whole batch. This requires a storage endpoint that supports `If-None-Match: *`.
 
 ```bash
 python -m src.stage_nat_assets \
@@ -362,9 +366,19 @@ python -m src.stage_nat_assets \
   --endpoint "$S3_ENDPOINT" --bucket h-wavjepa-audioset \
   --prefix nat-assets/20261023-v1 \
   --max-runtime-seconds 42600 --max-scratch-bytes 107374182400 \
-  --max-upload-bytes 206158430208 --workers 4 --requests-per-second 8 \
+  --max-upload-bytes 206158430208 --workers 8 --requests-per-second 9 \
+  --prefetch-sources 1 --download-backend huggingface \
   --result-path /output/nat-staging-success.json
 ```
+
+The optional `huggingface` backend uses the official pinned Hugging Face Hub/Xet
+client for parallel BRIR downloads; WHAM keeps its publisher HTTP download. Its
+supervised child has no private storage credentials, all caches remain inside
+the source's scratch directory, and the parent checks its runtime, disk use,
+final byte count and SHA-256. Chunk caching is disabled; shard cache and logs are
+bounded. `--download-backend urllib` keeps the dependency-light original path,
+and `--prefetch-sources 0` selects sequential preparation. The remote formats and
+receipt identities stay compatible with the original stager.
 
 Provide bucket-scoped credentials through the standard AWS environment. The
 command does not create compute, set a billing cap, or restart a job. A provider

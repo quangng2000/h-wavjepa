@@ -178,12 +178,14 @@ class _Output:
         kind: str,
         max_output_bytes: int,
         max_seconds: float,
+        external_check: Callable[[], None] | None = None,
     ) -> None:
         if type(max_output_bytes) is not int or max_output_bytes <= 0:
             raise ValueError("max_output_bytes must be a positive integer")
         if not math.isfinite(max_seconds) or max_seconds <= 0:
             raise ValueError("max_seconds must be finite and positive")
         self.deadline = time.monotonic() + max_seconds
+        self.external_check = external_check
         self.maximum = max_output_bytes
         source = Path(source).expanduser().resolve()
         expected_sha256 = _digest(expected_sha256)
@@ -224,6 +226,8 @@ class _Output:
         self.save()
 
     def check(self) -> None:
+        if self.external_check is not None:
+            self.external_check()
         if time.monotonic() >= self.deadline:
             raise PreparationLimit("Preparation runtime bound reached")
 
@@ -275,6 +279,7 @@ def prepare_brir_shard(
     max_archive_members: int = 1100,
     max_output_bytes: int = 3 * 1024**3,
     max_seconds: float = 3600,
+    external_check: Callable[[], None] | None = None,
 ) -> dict:
     """Convert one verified training shard and return its component manifest."""
     if re.fullmatch(r"train/webdataset_output/shard-\d{6}\.tar", source_member) is None:
@@ -292,6 +297,7 @@ def prepare_brir_shard(
         kind="nat_brir_shard",
         max_output_bytes=max_output_bytes,
         max_seconds=max_seconds,
+        external_check=external_check,
     )
     output.manifest["provenance"] = {
         "repository": BRIR_REPOSITORY,
@@ -377,6 +383,7 @@ def prepare_wham_noise(
     max_files: int = 20000,
     max_output_bytes: int = 8 * 1024**3,
     max_seconds: float = 3600,
+    external_check: Callable[[], None] | None = None,
 ) -> dict:
     """Convert only the publisher's training noise from a verified local ZIP."""
     if type(max_files) is not int or not 0 < max_files <= 20000:
@@ -392,6 +399,7 @@ def prepare_wham_noise(
         kind="nat_wham_noise",
         max_output_bytes=max_output_bytes,
         max_seconds=max_seconds,
+        external_check=external_check,
     )
     output.manifest["provenance"] = {
         "publisher": "http://wham.whisper.ai/",
