@@ -12,11 +12,16 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from hydra.utils import instantiate
 from lightning.pytorch.strategies import DDPStrategy
+from omegaconf import DictConfig, OmegaConf
+from test_multihost_segments import config_plan
 from test_step_checkpoint import InfiniteOnes, TinyModel, trainer_options
+from test_training_segments import CheckpointS3
 from torch.utils.data import DataLoader
 
-from scripts.segment_checkpoint import DurableStepCheckpoint
+from scripts.segment_checkpoint import CheckpointRepository, DurableStepCheckpoint
+from scripts.train_segment import make_config
 
 
 def callback_options(directory):
@@ -37,6 +42,97 @@ def callback_options(directory):
 
 def receipt(step, path):
     return {"checkpoint": {"step": step, "sha256": "a" * 64, "bytes": path.stat().st_size}}
+
+
+@pytest.mark.parametrize("lineage", ["batch_transition", "curriculum_source"])
+def test_hydra_nested_lineage_publishes_actual_checkpoint_and_verified_receipt(
+    tmp_path, monkeypatch, lineage
+):
+    client = CheckpointS3()
+    options = {
+        "bucket": "checkpoint-only",
+        "prefix": "training/target-run-001",
+        "run_id": "target-run-001",
+        "index_sha256": "a" * 64,
+        "base_data_seed": 42,
+        "global_batch": 144,
+        # Only the in-memory test double bypasses the SDK upload adapter.
+        "managed_upload": False,
+    }
+    if lineage == "batch_transition":
+        options.update(
+            clean_binaural=True,
+            batch_transition={
+                "source_run_id": "source-run-001",
+                "source_prefix": "training/source-run-001",
+                "source_checkpoint_sha256": "b" * 64,
+                "source_optimizer_step": 500,
+                "old_global_batch": 16,
+                "new_global_batch": 144,
+            },
+        )
+    else:
+        options.update(
+            naturalistic_manifest_sha256="c" * 64,
+            curriculum_source={
+                "run_id": "source-run-001",
+                "prefix": "training/source-run-001",
+                "checkpoint_sha256": "b" * 64,
+            },
+        )
+    repository = CheckpointRepository(client, **options, check=lambda: None)
+    repository.open(initialize=True)
+    endpoint = "https://storage.example.invalid"
+    if lineage == "batch_transition":
+        cfg = make_config(
+            config_plan(tmp_path)
+            | {
+                "distributed": {"nnodes": 1, "nproc_per_node": 8},
+                "global_batch": 144,
+                "resume_step": 500,
+                "resolved_data_seed": 542,
+                "repository_options": options | {"endpoint": endpoint},
+            }
+        ).callbacks.model_checkpoint
+    else:
+        cfg = OmegaConf.create(
+            {"_target_": "scripts.segment_checkpoint.DurableStepCheckpoint"}
+            | callback_options(tmp_path)
+            | {"repository_options": options | {"endpoint": endpoint}, "data_seed": 542}
+        )
+    assert isinstance(cfg.repository_options[lineage], DictConfig)
+    callback = instantiate(cfg)
+    assert type(callback.repository_options[lineage]) is dict
+    assert callback.repository_options[lineage] == options[lineage]
+    monkeypatch.setattr("scripts.segment_checkpoint.checkpoint_client", lambda _: client)
+
+    def save_checkpoint(path, weights_only):
+        assert weights_only is False
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"global_step": 750, "state_dict": {"weight": torch.ones(2)}}, path)
+
+    trainer = SimpleNamespace(
+        is_global_zero=True,
+        global_step=750,
+        strategy=SimpleNamespace(broadcast=lambda value: value),
+        save_checkpoint=save_checkpoint,
+        loggers=[],
+    )
+    path = tmp_path / "recovery" / "step_0000750.ckpt"
+    try:
+        # Exercise the real background publisher, constructor, SHA readback,
+        # receipt serialization and callback receipt propagation after Hydra.
+        callback._save_checkpoint(trainer, str(path))
+        callback._drain_publication(trainer)
+    finally:
+        callback._shutdown_publisher()
+    published = repository.latest()
+    assert published == callback.last_receipt
+    assert published["owner"] == repository.owner
+    assert published["owner"][lineage] == options[lineage]
+    assert published["checkpoint"]["step"] == 750
+    assert client.objects[published["checkpoint"]["key"]] == path.read_bytes()
+    assert json.loads(callback.receipt_path.read_text()) == published
 
 
 @pytest.mark.integration

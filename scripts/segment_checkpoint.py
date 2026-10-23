@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from lightning.pytorch.callbacks import Timer
 from lightning.pytorch.strategies import DDPStrategy
+from omegaconf import OmegaConf
 
 from src.callbacks.step_checkpoint import StepCheckpoint
 from src.stage_audioset import MAX_OBJECT_BYTES, Store
@@ -502,7 +503,12 @@ class DurableStepCheckpoint(StepCheckpoint):
         if type(async_upload) is not bool:
             raise ValueError("async_upload must be a boolean")
         minimum_checkpoint_collective_timeout(transfer_timeout_seconds)
-        self.repository_options = dict(repository_options)
+        # Hydra keeps nested mappings as DictConfig even after dict(...).
+        # The asynchronous publisher reconstructs the strict repository owner,
+        # whose pinned lineage must consist of ordinary JSON-compatible values.
+        self.repository_options = OmegaConf.to_container(
+            OmegaConf.create(dict(repository_options)), resolve=True
+        )
         self.segment_id, self.receipt_path = segment_id, Path(receipt_path)
         self.data_seed = data_seed
         self.transfer_timeout_seconds, self.hard_deadline = transfer_timeout_seconds, hard_deadline
