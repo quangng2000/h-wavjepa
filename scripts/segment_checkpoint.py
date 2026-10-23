@@ -95,6 +95,8 @@ class CheckpointRepository:
         base_data_seed: int = 42,
         global_batch: int = 64,
         naturalistic_manifest_sha256: str | None = None,
+        clean_binaural: bool = False,
+        curriculum_source: dict | None = None,
     ):
         if not RUN_ID.fullmatch(run_id) or not SHA.fullmatch(index_sha256):
             raise ValueError("Expected a stable run ID and frozen index SHA256")
@@ -110,6 +112,18 @@ class CheckpointRepository:
             raise ValueError(
                 "Nat checkpoint ownership requires a manifest SHA256 and global batch 16"
             )
+        if clean_binaural and (naturalistic_manifest_sha256 is not None or global_batch != 16):
+            raise ValueError("Clean binaural checkpoints require batch 16 and no Nat manifest")
+        if curriculum_source is not None:
+            if (
+                naturalistic_manifest_sha256 is None
+                or not isinstance(curriculum_source, dict)
+                or set(curriculum_source) != {"run_id", "prefix", "checkpoint_sha256"}
+                or not RUN_ID.fullmatch(curriculum_source.get("run_id", ""))
+                or not SHA.fullmatch(curriculum_source.get("checkpoint_sha256", ""))
+                or curriculum_source.get("prefix") == prefix
+            ):
+                raise ValueError("Curriculum lineage requires a distinct pinned clean source")
         parts = prefix.split("/")
         if (
             len(parts) < 2
@@ -133,13 +147,17 @@ class CheckpointRepository:
             "base_data_seed": base_data_seed,
             "data_seed_policy": "base_plus_resume_step",
         }
-        if naturalistic_manifest_sha256 is not None:
+        if naturalistic_manifest_sha256 is not None or clean_binaural:
             self.owner.update(
+                training_phase="clean_binaural" if clean_binaural else "naturalistic",
                 naturalistic_manifest_sha256=naturalistic_manifest_sha256,
                 input_channels=2,
                 masked_crops_per_recording=8,
                 masked_crop_samples=32160,
             )
+        if curriculum_source is not None:
+            self.owner["curriculum_source"] = dict(curriculum_source)
+        self.handoff_key = f"{prefix}/clean-handoff.json"
         self.owner_key, self.latest_key = f"{prefix}/owner.json", f"{prefix}/latest.json"
         self.object_pattern = re.compile(
             re.escape(prefix) + r"/checkpoints/step_[0-9]{7}_[a-f0-9]{64}\.ckpt"
@@ -159,6 +177,8 @@ class CheckpointRepository:
             raise ValueError("Checkpoint prefix belongs to a different run or frozen data index")
 
     def open(self, *, initialize: bool):
+        if self.store.head(self.handoff_key) is not None:
+            raise ValueError("Clean curriculum source is sealed after its completed handoff")
         if self.store.head(self.owner_key) is None:
             if not initialize or self._keys(self.prefix + "/"):
                 raise ValueError("Cannot resume or adopt an unowned/nonempty checkpoint prefix")
@@ -207,6 +227,8 @@ class CheckpointRepository:
 
     def publish(self, path: Path, step: int, *, segment_id: str, data_seed: int) -> dict:
         self.assert_owner()
+        if self.store.head(self.handoff_key) is not None:
+            raise ValueError("Clean curriculum source is sealed after its completed handoff")
         if (
             type(data_seed) is not int
             or not self.base_data_seed <= data_seed < self.base_data_seed + step
@@ -253,6 +275,65 @@ class CheckpointRepository:
         # own the prefix, as acknowledged by the launching orchestrator.
         self.store.put_json(self.latest_key, receipt)
         return receipt
+
+    def publish_clean_handoff(self, receipt: dict, *, writer_finished: bool) -> dict:
+        """Seal a completed clean phase, only after all training ranks have exited."""
+        self.assert_owner()
+        if (
+            writer_finished is not True
+            or self.owner.get("training_phase") != "clean_binaural"
+            or receipt != self.latest()
+            or receipt["checkpoint"]["step"] >= 375000
+        ):
+            raise ValueError("Clean handoff requires an exited writer and its advanced checkpoint")
+        self.store.confirm_receipt(receipt["checkpoint"])
+        handoff = {
+            "schema_version": 1,
+            "phase": "clean_binaural",
+            "writer_finished": True,
+            "ready_for_nat": True,
+            "source_run_id": self.run_id,
+            "source_prefix": self.prefix,
+            "index_sha256": self.index_sha256,
+            "global_batch": 16,
+            "input_channels": 2,
+            "masked_crops_per_recording": 8,
+            "masked_crop_samples": 32160,
+            "total_optimizer_steps": 375000,
+            "checkpoint": receipt,
+        }
+        self.store.put_json(self.handoff_key, handoff, immutable=True)
+        return handoff
+
+    def clean_handoff(self, expected_checkpoint_sha256: str) -> dict:
+        """Read a sealed source without adopting or reopening its writer."""
+        self.assert_owner()
+        handoff = json.loads(self.store.read(self.handoff_key))
+        latest = self.latest()
+        expected = {
+            "schema_version": 1,
+            "phase": "clean_binaural",
+            "writer_finished": True,
+            "ready_for_nat": True,
+            "source_run_id": self.run_id,
+            "source_prefix": self.prefix,
+            "index_sha256": self.index_sha256,
+            "global_batch": 16,
+            "input_channels": 2,
+            "masked_crops_per_recording": 8,
+            "masked_crop_samples": 32160,
+            "total_optimizer_steps": 375000,
+            "checkpoint": latest,
+        }
+        if (
+            self.owner.get("training_phase") != "clean_binaural"
+            or latest is None
+            or handoff != expected
+            or latest["checkpoint"]["sha256"] != expected_checkpoint_sha256
+            or latest["checkpoint"]["step"] >= 375000
+        ):
+            raise ValueError("Clean curriculum handoff does not match its pinned source checkpoint")
+        return handoff
 
     def download_latest(self, destination: Path) -> dict:
         self.assert_owner()

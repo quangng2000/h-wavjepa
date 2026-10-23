@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 INVENTORY = ROOT / "docs/validation/wavjepa-nat-assets-2026-10-23.json"
 MAX_RECEIPT_BYTES = 1024**2
 MAX_MANIFEST_BYTES = 256 * 1024**2
@@ -283,7 +284,7 @@ def fetch_ready_manifest(
     return receipt
 
 
-def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint):
+def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint, curriculum=None):
     """Protect the selected Nat model, frozen inputs and explicit preflight waiver."""
     reserved = {
         "--nat",
@@ -296,10 +297,13 @@ def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint):
         "--worker-plan",
         "--execute-started",
         "--plan-only",
+        "--curriculum-source-prefix",
+        "--curriculum-source-run-id",
+        "--curriculum-source-checkpoint-sha256",
     }
     if any(argument.split("=", 1)[0] in reserved for argument in segment_args):
         raise ValueError("Segment arguments must not override bootstrap-owned Nat inputs")
-    return [
+    command = [
         sys.executable,
         str(ROOT / "scripts/train_segment.py"),
         "--nat",
@@ -314,6 +318,16 @@ def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint):
         WAIVER_REASON,
         *segment_args,
     ]
+    if curriculum is not None:
+        command += [
+            "--curriculum-source-prefix",
+            curriculum["source_prefix"],
+            "--curriculum-source-run-id",
+            curriculum["source_run_id"],
+            "--curriculum-source-checkpoint-sha256",
+            curriculum["source_checkpoint_sha256"],
+        ]
+    return command
 
 
 def main(argv=None):
@@ -324,6 +338,9 @@ def main(argv=None):
     parser.add_argument("--nat-endpoint", default="https://storage.givemeanode.com")
     parser.add_argument("--nat-inventory", type=Path, default=INVENTORY)
     parser.add_argument("--metadata-timeout-seconds", type=float, default=180)
+    parser.add_argument("--curriculum-ready-key")
+    parser.add_argument("--curriculum-source-prefix")
+    parser.add_argument("--curriculum-source-run-id")
     parser.add_argument(
         "--latest-start-utc",
         type=utc_timestamp,
@@ -334,6 +351,15 @@ def main(argv=None):
     segment_args = args.segment_args[1:] if args.segment_args[:1] == ["--"] else args.segment_args
     if not segment_args:
         parser.error("Supply the bounded production segment arguments after --")
+    curriculum_fields = [
+        args.curriculum_ready_key,
+        args.curriculum_source_prefix,
+        args.curriculum_source_run_id,
+    ]
+    if any(curriculum_fields) and not all(curriculum_fields):
+        parser.error(
+            "Curriculum readiness key, source prefix and source run ID must be supplied together"
+        )
     ensure_start_deadline(args.latest_start_utc)
     endpoint = _endpoint(args.nat_endpoint)
     # Validate protected arguments before any network or file operation.
@@ -343,15 +369,47 @@ def main(argv=None):
         manifest_sha256="0" * 64,
         endpoint=endpoint,
     )
-    receipt = fetch_ready_manifest(
-        metadata_client(endpoint),
-        bucket=args.nat_bucket,
-        endpoint=endpoint,
-        ready_key=args.nat_ready_key,
-        manifest_path=args.nat_manifest_path,
-        inventory_path=args.nat_inventory,
-        timeout_seconds=args.metadata_timeout_seconds,
-    )
+    curriculum = None
+    with _metadata_deadline(args.metadata_timeout_seconds):
+        receipt = fetch_ready_manifest(
+            metadata_client(endpoint),
+            bucket=args.nat_bucket,
+            endpoint=endpoint,
+            ready_key=args.nat_ready_key,
+            manifest_path=args.nat_manifest_path,
+            inventory_path=args.nat_inventory,
+            timeout_seconds=args.metadata_timeout_seconds,
+        )
+        if args.curriculum_ready_key:
+            from scripts.wait_nat_curriculum import (
+                checkpoint_metadata_client,
+                fetch_curriculum_handoff,
+            )
+
+            runner_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+            runner_parser.add_argument("--checkpoint-bucket", required=True)
+            runner_parser.add_argument("--checkpoint-prefix", required=True)
+            runner_parser.add_argument(
+                "--checkpoint-endpoint", default="https://storage.givemeanode.com"
+            )
+            runner_parser.add_argument("--index-sha256", required=True)
+            runner, _ = runner_parser.parse_known_args(segment_args)
+            if args.curriculum_ready_key.startswith(runner.checkpoint_prefix + "/"):
+                raise ValueError(
+                    "Curriculum control object must be outside the destination checkpoint prefix"
+                )
+            curriculum = fetch_curriculum_handoff(
+                checkpoint_metadata_client(runner.checkpoint_endpoint),
+                bucket=runner.checkpoint_bucket,
+                ready_key=args.curriculum_ready_key,
+                source_prefix=args.curriculum_source_prefix,
+                source_run_id=args.curriculum_source_run_id,
+                index_sha256=runner.index_sha256,
+                nat_bucket=args.nat_bucket,
+                nat_endpoint=endpoint,
+                nat_ready_key=args.nat_ready_key,
+                nat_receipt=receipt,
+            )
     ensure_start_deadline(args.latest_start_utc)
     print(
         json.dumps(
@@ -362,6 +420,9 @@ def main(argv=None):
                 "manifest_sha256": receipt["manifest"]["sha256"],
                 "separate_gpu_preflight": "waived_by_user",
                 "hardware_acceptance_passed": False,
+                "curriculum_source_step": curriculum["source_optimizer_step"]
+                if curriculum
+                else None,
             }
         ),
         flush=True,
@@ -372,6 +433,7 @@ def main(argv=None):
             manifest_path=args.nat_manifest_path,
             manifest_sha256=receipt["manifest"]["sha256"],
             endpoint=endpoint,
+            curriculum=curriculum,
         ),
         check=False,
     ).returncode

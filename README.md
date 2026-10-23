@@ -14,6 +14,11 @@ shared temporal masks, naturalistic room/noise rendering, and eight random
 Four-H100 Nat throughput remains unmeasured; an explicitly waived GPU preflight
 is recorded as such, and the clean mono benchmark does not qualify Nat.
 
+The optional clean-to-Nat curriculum starts the same binaural model on clean
+audio duplicated into both channels, then resumes with verified room/noise
+augmentation. It preserves optimizer, EMA and step progress; it is a separate
+training recipe from Nat throughout. See the [handoff guide](docs/TRAINING_SEGMENTS.md).
+
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
 *Pointwise baseline sketch. The AudioSet preset uses 1.01-second windows; the long-recording preset uses 2.01 seconds. See [architecture and temporal grids](docs/UPSTREAM_DYNAMICS.md).*
@@ -74,6 +79,7 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 | `audioset_baseline` | Masked-only control under the same nine-window AudioSet recipe |
 | `audioset_baseline_h100` / `audioset_baseline_h100_fast` / `audioset_baseline_h100_four` | Masked-only controls matching the two/four-H100 execution presets |
 | `audioset_nat` / `audioset_nat_h100_four` | Binaural Nat masked anchor plus temporal hierarchy; explicit BRIR/noise manifest required |
+| `audioset_clean_binaural_h100_four` | Clean first phase of the Nat curriculum; same model, global 16 recordings × 8 crops |
 | `audioset_nat_baseline` / `audioset_nat_baseline_h100_four` | Masked-only Nat control: global 16 recordings × 8 crops |
 | `audioset_nat_pointwise` / `audioset_nat_pointwise_h100_four` | Matched Nat pointwise control, retaining the temporal penalty |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |

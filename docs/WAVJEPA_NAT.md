@@ -1,12 +1,13 @@
 # WavJEPA-Nat and the hierarchical adaptation
 
 WavJEPA-Nat requires binaural naturalistic scenes. Duplicating clean mono audio
-into two channels is an evaluation compatibility operation, not naturalistic
-training. The existing clean AudioSet corpus supplies the sound sources; it does
+into two channels supports evaluation compatibility or an explicit clean first
+phase; it does not create naturalistic training data. The existing clean AudioSet corpus supplies the sound sources; it does
 not supply the room responses or background noise.
 
-The Nat implementation is not ready for a production GPU run until the asset
-and hardware gates below pass. The successful four-H100 **mono** temporal test
+Nat production requires the verified assets below. The optional separate GPU
+preflight may be explicitly waived and that waiver is recorded in the run.
+The successful four-H100 **mono** temporal test
 does not validate Nat throughput, memory use, scene generation, or checkpoint
 compatibility. Its runtime and cost estimates must not be reused for Nat.
 

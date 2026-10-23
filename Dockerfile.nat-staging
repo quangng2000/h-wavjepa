@@ -6,6 +6,7 @@ COPY uv.lock ./
 RUN python -c "import tomllib; packages=tomllib.load(open('uv.lock','rb'))['package']; open('/tmp/constraints.txt','w').write('\n'.join(p['name']+'=='+p['version']+(' ; '+' or '.join(p['resolution-markers']) if p.get('resolution-markers') else '') for p in packages if 'version' in p)+'\n')" \
     && python -m pip install --no-cache-dir -c /tmp/constraints.txt numpy scipy soundfile boto3 huggingface_hub hf_xet
 COPY src/ src/
+COPY scripts/ scripts/
 COPY configs/data/audioset-source-catalog.json configs/data/audioset-source-catalog.json
 COPY docs/validation/wavjepa-nat-assets-2026-10-23.json docs/validation/wavjepa-nat-assets-2026-10-23.json
 ENV PYTHONPATH=/app OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1

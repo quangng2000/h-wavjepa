@@ -151,6 +151,34 @@ ownership. Resuming with changed assets or switching between mono and Nat fails.
 `scripts/start_nat_segment.py` can fetch the completed staging receipt and its
 hash-verified manifest before invoking this runner; it does not rent GPUs.
 
+### Optional clean-to-Nat curriculum
+
+`--clean-binaural` selects `audioset_clean_binaural_h100_four`: clean AudioSet
+is copied into both ears before chronological windows and the eight random
+masked crops are drawn. The model, global batch of 16 recordings, crop sizes,
+optimizer and absolute 375,000-step schedule match the Nat phase. This is an
+explicit curriculum experiment, not Nat from the first update.
+
+The clean segment can use `--stop-on-nat-ready-bucket` and
+`--stop-on-nat-ready-key` to stop when the pinned staging receipt is complete.
+Rank zero checks the small receipt every 100 optimizer steps; all ranks stop
+together, validate and save a full checkpoint. Otherwise the ordinary segment
+time budget stops the clean phase.
+
+After the clean job succeeds, `scripts/wait_nat_curriculum.py` runs on a bounded
+CPU job. It validates the clean handoff and full Nat manifest, then publishes a
+small curriculum receipt. A dependent Nat job starts only after that gate
+succeeds, preventing simultaneous GPU writers. If assets are late, waiting
+consumes CPU time, not GPU time.
+
+Nat imports the clean checkpoint into a **new owned checkpoint prefix** through
+the explicit curriculum source options. The transition is bound to the verified
+source checkpoint SHA, original data-state digest, frozen AudioSet index and
+target Nat manifest. Only clean-binaural → naturalistic is accepted. Model
+parameters, Adam state, LR scheduler, EMA and global step are restored; ordinary
+resumes continue to reject changed data recipes. The shard iterator restarts
+under the documented seed policy below.
+
 Data iterator and prefetch positions are **not restored**. This limitation needs
 the explicit acknowledgement flag. Each segment records the policy
 `data_seed = base_data_seed + resumed_optimizer_step`, using the base seed for the

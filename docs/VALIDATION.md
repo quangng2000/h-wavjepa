@@ -5,6 +5,12 @@ behavior, not improved representation quality or reproduced benchmark scores.
 
 ## Nat integration, 23 October 2026
 
+Clean-to-Nat curriculum support passed 139 focused checks covering checkpoint
+sealing, full-state restore, one-way data transitions, readiness polling and
+the CPU handoff gate. An additional 60 related data/config checks passed.
+These local checks do not establish four-H100 binaural throughput. The user
+waived a separate GPU preflight; the production run records that waiver.
+
 The later production-launch changes add resumable CPU asset staging and a
 dependent Nat training bootstrap. The user explicitly waived the separate Nat
 GPU probe. This is an operational choice, not new hardware-validation evidence;

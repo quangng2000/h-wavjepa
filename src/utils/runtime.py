@@ -254,8 +254,14 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         raise ValueError("backbone.input_channels must be 1 or 2")
     if cfg.data.get("_target_") == "src.data.sharded_audio_datamodule.ShardedAudioDataModule":
         naturalistic = cfg.data.get("naturalistic_manifest") is not None
-        if naturalistic != (channels == 2):
-            raise ValueError("Binaural staged training requires an explicit naturalistic manifest")
+        clean_binaural = cfg.data.get("clean_binaural", False)
+        if type(clean_binaural) is not bool or (clean_binaural and naturalistic):
+            raise ValueError("clean_binaural must be boolean and exclude a naturalistic manifest")
+        if (naturalistic or clean_binaural) != (channels == 2):
+            raise ValueError(
+                "Binaural staged training requires an explicit naturalistic manifest "
+                "or clean_binaural=true"
+            )
     forecasting = any(cfg.model.prediction_weights) or cfg.model.regularization_weight or weight
     expected = backbone.window_samples * (cfg.model.context_windows + max(horizons))
     if (forecasting or not crops) and cfg.data.num_samples != expected:

@@ -232,6 +232,26 @@ def verify_streaming_report(
 
 def validate_launch_options(args):
     nat = getattr(args, "nat", False)
+    clean = getattr(args, "clean_binaural", False)
+    if nat and clean:
+        raise ValueError("Choose exactly one of --nat and --clean-binaural")
+    source_fields = [
+        getattr(args, name, None)
+        for name in (
+            "curriculum_source_prefix",
+            "curriculum_source_run_id",
+            "curriculum_source_checkpoint_sha256",
+        )
+    ]
+    if any(value is not None for value in source_fields) and (
+        not nat or not all(source_fields) or not SHA.fullmatch(source_fields[2])
+    ):
+        raise ValueError("Curriculum import requires Nat and a complete pinned clean source")
+    readiness = [
+        getattr(args, name, None) for name in ("stop_on_nat_ready_key", "stop_on_nat_ready_bucket")
+    ]
+    if any(readiness) and (not clean or not all(readiness)):
+        raise ValueError("Nat readiness early-stop requires clean binaural and both bucket/key")
     manifest = getattr(args, "naturalistic_manifest", None)
     digest = getattr(args, "naturalistic_manifest_sha256", None)
     if (
@@ -262,6 +282,8 @@ def streaming_acceptance(args):
             "reason": args.streaming_acceptance_waiver_reason.strip(),
             "scope": "separate streaming GPU preflight only; runtime validation and checkpoint integrity remain enabled",
         }
+    if getattr(args, "clean_binaural", False):
+        raise ValueError("Clean binaural curriculum requires an explicit preflight waiver")
     if not args.streaming_smoke_report:
         raise ValueError("A successful streaming hardware report is required before launch")
     digest = verify_streaming_report(
@@ -326,6 +348,7 @@ def verify_resume_state(
     *,
     nat: bool = False,
     naturalistic_manifest_sha256: str | None = None,
+    clean_binaural: bool = False,
 ):
     import torch
 
@@ -349,14 +372,27 @@ def verify_resume_state(
         )
     from src.models.hierarchical_wavjepa_module import HierarchicalWavJEPAModule
 
+    if nat and clean_binaural:
+        raise ValueError("Cannot verify a checkpoint as both clean and naturalistic")
+    binaural = nat or clean_binaural
     metadata = HierarchicalWavJEPAModule.validated_checkpoint_metadata(state)
     dynamics = metadata["dynamics"]
     data_state = state.get("ShardedAudioDataModule", {})
     if (
-        metadata["backbone"].get("input_channels", 1) != (2 if nat else 1)
-        or dynamics.get("masked_crops_per_recording", 0) != (8 if nat else 0)
-        or dynamics.get("masked_crop_samples") != (32160 if nat else None)
+        metadata["backbone"].get("input_channels", 1) != (2 if binaural else 1)
+        or dynamics.get("masked_crops_per_recording", 0) != (8 if binaural else 0)
+        or dynamics.get("masked_crop_samples") != (32160 if binaural else None)
         or data_state.get("naturalistic_sha256") != naturalistic_manifest_sha256
+        or (
+            clean_binaural
+            and (
+                data_state.get("data_mode") != "clean_binaural"
+                or data_state.get("masked_crops_per_recording") != 8
+                or data_state.get("masked_crop_samples") != 32160
+                or receipt.get("owner", {}).get("training_phase") != "clean_binaural"
+                or receipt.get("owner", {}).get("global_batch") != 16
+            )
+        )
         or (
             nat
             and (
@@ -386,16 +422,48 @@ def verify_resume_state(
     return step
 
 
+def import_clean_curriculum(
+    source: CheckpointRepository,
+    destination: Path,
+    *,
+    expected_checkpoint_sha256: str,
+    index_sha256: str,
+    target_manifest_sha256: str,
+):
+    """Restore untouched full Lightning state; permit only the verified data-phase change."""
+    import torch
+
+    from src.data.sharded_audio_datamodule import data_state_sha256
+
+    handoff = source.clean_handoff(expected_checkpoint_sha256)
+    receipt = source.download_latest(destination)
+    if receipt != handoff["checkpoint"] or file_sha256(destination) != expected_checkpoint_sha256:
+        raise ValueError("Clean source changed while importing its handoff")
+    step = verify_resume_state(destination, receipt, index_sha256, clean_binaural=True)
+    original = torch.load(destination, map_location="cpu", weights_only=True)
+    transition = {
+        "source_checkpoint_sha256": expected_checkpoint_sha256,
+        "source_data_state_sha256": data_state_sha256(original["ShardedAudioDataModule"]),
+        "index_sha256": index_sha256,
+        "target_manifest_sha256": target_manifest_sha256,
+    }
+    return step, receipt, transition
+
+
 def make_config(plan: dict):
     from hydra import compose, initialize_config_dir
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
     nat = plan.get("nat", False)
-    global_batch = 16 if nat else 64
+    clean = plan.get("clean_binaural", False)
+    binaural = nat or clean
+    global_batch = 16 if binaural else 64
     experiment = (
-        "audioset_nat_h100_four"
-        if nat
+        "audioset_clean_binaural_h100_four"
+        if clean
+        else "audioset_nat_h100_four"
+        if binaural
         else (
             "audioset_temporal_h100_four" if plan.get("temporal", False) else "audioset_h100_four"
         )
@@ -439,6 +507,16 @@ def make_config(plan: dict):
             "every_n_train_steps": plan["checkpoint_every_steps"],
         },
     }
+    if plan.get("nat_readiness"):
+        readiness = plan["nat_readiness"]
+        cfg.callbacks["nat_readiness"] = {
+            "_target_": "scripts.curriculum_ready_stop.NatReadyStop",
+            "endpoint": readiness["endpoint"],
+            "bucket": readiness["bucket"],
+            "ready_key": readiness["key"],
+        }
+    cfg.data.clean_binaural = clean
+    cfg.data.clean_to_nat_transition = plan.get("clean_to_nat_transition")
     cfg.data.index_path = str(work / "frozen-index.json")
     cfg.data.endpoint = plan["data_endpoint"]
     cfg.data.cache_dir = str(work / "shard-cache")
@@ -474,7 +552,7 @@ def make_config(plan: dict):
         or cfg.trainer.get("accumulate_grad_batches", 1) != 1
     ):
         raise ValueError(f"Segment must preserve its global optimizer batch of {global_batch}")
-    if nat and (
+    if binaural and (
         cfg.data.masked_crops_per_recording != 8
         or cfg.data.masked_crop_samples != 32160
         or cfg.model.masked_crops_per_recording != 8
@@ -520,7 +598,10 @@ def worker(plan_path: Path):
                 "final_optimizer_step": step,
                 "ema_updates": int(model.ema_updates),
                 "global_batch": plan["global_batch"],
-                "global_masked_crops": 128 if plan["nat"] else 0,
+                "global_masked_crops": 128 if plan["nat"] or plan.get("clean_binaural") else 0,
+                "training_phase": "naturalistic"
+                if plan["nat"]
+                else ("clean_binaural" if plan.get("clean_binaural") else "mono"),
                 "naturalistic_manifest_sha256": plan["naturalistic_manifest_sha256"],
                 "streaming_acceptance": plan["streaming_acceptance"],
                 "model_variant": plan["model_variant"],
@@ -661,8 +742,9 @@ def execute_segment(args):
             "Explicit exclusive-writer and stream-restart acknowledgements are required"
         )
     acceptance = streaming_acceptance(args)
-    nat, temporal = args.nat, args.temporal or args.nat
-    global_batch = 16 if nat else 64
+    nat, clean = args.nat, getattr(args, "clean_binaural", False)
+    temporal = args.temporal or nat or clean
+    global_batch = 16 if nat or clean else 64
     started = args.execute_started
     hard_deadline = started + budget.seconds
     training_deadline = hard_deadline - budget.finalization_reserve_seconds
@@ -687,6 +769,16 @@ def execute_segment(args):
             bucket=index["bucket"],
             endpoint=args.data_endpoint,
         )
+    source_prefix = getattr(args, "curriculum_source_prefix", None)
+    curriculum_source = (
+        None
+        if source_prefix is None
+        else {
+            "prefix": source_prefix,
+            "run_id": args.curriculum_source_run_id,
+            "checkpoint_sha256": args.curriculum_source_checkpoint_sha256,
+        }
+    )
     repository_options = dict(
         bucket=args.checkpoint_bucket,
         prefix=args.checkpoint_prefix,
@@ -695,12 +787,14 @@ def execute_segment(args):
         base_data_seed=args.base_data_seed,
         global_batch=global_batch,
         naturalistic_manifest_sha256=naturalistic_sha,
+        clean_binaural=clean,
+        curriculum_source=curriculum_source,
     )
     repository = CheckpointRepository(
         checkpoint_client(args.checkpoint_endpoint), **repository_options, check=check
     )
     repository.open(initialize=not args.resume)
-    resume_path, resume_step = None, 0
+    resume_path, resume_step, transition = None, 0, None
     if args.resume:
         resume_path = args.work_dir / "resume.ckpt"
         receipt = repository.download_latest(resume_path)
@@ -710,18 +804,52 @@ def execute_segment(args):
             frozen_sha,
             nat=nat,
             naturalistic_manifest_sha256=naturalistic_sha,
+            clean_binaural=clean,
         )
         atomic_json(args.output / "resumed-checkpoint.json", receipt)
         if resume_step == 375000:
             raise ValueError("Training already completed 375000 steps; no new segment is needed")
+    elif curriculum_source is not None:
+        source = CheckpointRepository(
+            repository.store.client,
+            bucket=args.checkpoint_bucket,
+            prefix=source_prefix,
+            run_id=args.curriculum_source_run_id,
+            index_sha256=frozen_sha,
+            check=check,
+            base_data_seed=args.base_data_seed,
+            global_batch=16,
+            clean_binaural=True,
+        )
+        resume_path = args.work_dir / "resume.ckpt"
+        resume_step, receipt, transition = import_clean_curriculum(
+            source,
+            resume_path,
+            expected_checkpoint_sha256=args.curriculum_source_checkpoint_sha256,
+            index_sha256=frozen_sha,
+            target_manifest_sha256=naturalistic_sha,
+        )
+        atomic_json(args.output / "imported-clean-checkpoint.json", receipt)
     check()
     plan = {
         "segment_id": args.segment_id,
         "nat": nat,
+        "clean_binaural": clean,
+        "clean_to_nat_transition": transition,
+        "curriculum_source": curriculum_source,
+        "nat_readiness": {
+            "endpoint": args.data_endpoint,
+            "bucket": args.stop_on_nat_ready_bucket,
+            "key": args.stop_on_nat_ready_key,
+        }
+        if getattr(args, "stop_on_nat_ready_key", None)
+        else None,
         "temporal": temporal,
         "global_batch": global_batch,
         "naturalistic_manifest_sha256": naturalistic_sha,
-        "model_variant": "nat_temporal_aggregation"
+        "model_variant": "clean_binaural_temporal_aggregation"
+        if clean
+        else "nat_temporal_aggregation"
         if nat
         else ("temporal_aggregation" if temporal else "pointwise"),
         "work_dir": str(args.work_dir.resolve()),
@@ -767,6 +895,18 @@ def execute_segment(args):
         or result.get("final_optimizer_step", 0) <= resume_step
     ):
         raise RuntimeError("Worker exited without an advanced, verified final checkpoint")
+    if clean:
+        # The torchrun process exited successfully, so no training rank is still
+        # mutating this prefix. Seal its final checkpoint for the dependent Nat job.
+        def handoff_check():
+            if time.time() >= hard_deadline - 30:
+                raise TimeoutError("Clean handoff exceeded segment deadline")
+
+        repository.store.check = handoff_check
+        handoff = repository.publish_clean_handoff(result["checkpoint"], writer_finished=True)
+        atomic_json(args.output / "clean-handoff.json", handoff)
+        result["ready_for_nat"] = True
+        result["clean_handoff_key"] = repository.handoff_key
     result["wall_seconds"] = time.time() - started
     result["observed_runner_time_cost_at_supplied_rate_usd"] = (
         result["wall_seconds"] / 3600 * budget.maximum_rate_usd_per_hour
@@ -799,6 +939,16 @@ def main(argv=None):
         help="Use the tested temporal aggregation model; omit for the pointwise baseline",
     )
     parser.add_argument("--nat", action="store_true", help="Train the binaural Nat temporal model")
+    parser.add_argument(
+        "--clean-binaural",
+        action="store_true",
+        help="Duplicate clean mono into the unchanged two-channel Nat architecture",
+    )
+    parser.add_argument("--curriculum-source-prefix")
+    parser.add_argument("--curriculum-source-run-id")
+    parser.add_argument("--curriculum-source-checkpoint-sha256")
+    parser.add_argument("--stop-on-nat-ready-key")
+    parser.add_argument("--stop-on-nat-ready-bucket")
     parser.add_argument("--naturalistic-manifest", type=Path)
     parser.add_argument("--naturalistic-manifest-sha256")
     parser.add_argument("--skip-streaming-acceptance", action="store_true")

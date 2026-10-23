@@ -1097,3 +1097,195 @@ def test_strict_nat_acceptance_still_requires_matching_remote_assets_and_both_ea
     path.write_text(json.dumps(report))
     with pytest.raises(ValueError, match="both independent ear CNNs"):
         streaming_acceptance(args)
+
+
+def clean_curriculum_state():
+    from test_hierarchical_dynamics import model_factory
+    from test_nat_backbone import nat_config
+
+    from src.models.components.wavjepa_backbone import WavJEPABackbone
+
+    model = model_factory(
+        backbone=WavJEPABackbone(nat_config()),
+        masked_crops_per_recording=8,
+        masked_crop_samples=32160,
+        aggregation_windows=[1, 2, 2],
+        temporal_variance_weight=0.1,
+        lr_schedule="cosine",
+        lr_total_steps=375000,
+        lr_warmup_steps=100000,
+        ema_anneal_end_step=100000,
+        ema_end_decay=0.99999,
+    )
+    return {
+        "global_step": 2,
+        "state_dict": {"ema_updates": torch.tensor(2)},
+        "optimizer_states": [
+            {"state": {0: {"step": torch.tensor(2), "exp_avg": torch.tensor([0.7])}}}
+        ],
+        "lr_schedulers": [{"last_epoch": 2}],
+        "loops": {"fit_loop": {"optimizer_step": 2}},
+        "ShardedAudioDataModule": {
+            "index_sha256": "a" * 64,
+            "naturalistic_sha256": None,
+            "data_mode": "clean_binaural",
+            "masked_crops_per_recording": 8,
+            "masked_crop_samples": 32160,
+        },
+        model.CHECKPOINT_KEY: model.checkpoint_metadata(),
+        model.SCHEDULE_CHECKPOINT_KEY: {
+            "total_steps": 375000,
+            "warmup_steps": 100000,
+            "ema_end_step": 100000,
+        },
+    }
+
+
+def test_clean_binaural_config_uses_unchanged_nat_model_without_manifest(tmp_path):
+    clean = make_config(plan(tmp_path) | {"clean_binaural": True})
+    assert clean.data.clean_binaural is True
+    assert clean.data.naturalistic_manifest is None
+    assert clean.data.batch_size == 4 and clean.trainer.devices == 4
+    assert clean.data.masked_crops_per_recording == 8
+    assert clean.data.masked_crop_samples == 32160
+    assert clean.model.backbone.config.input_channels == 2
+    assert clean.model.lr_total_steps == 375000
+    segment = plan(tmp_path) | {
+        "clean_binaural": True,
+        "nat_readiness": {
+            "endpoint": "https://storage.givemeanode.com",
+            "bucket": "audio",
+            "key": "nat/ready.json",
+        },
+    }
+    cfg = make_config(segment)
+    assert cfg.callbacks.nat_readiness.ready_key == "nat/ready.json"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"nat": True},
+        {"naturalistic_manifest": Path("manifest.json")},
+        {"curriculum_source_prefix": "training/other-run"},
+        {"stop_on_nat_ready_key": "nat/ready.json"},
+    ],
+)
+def test_clean_curriculum_launch_rejects_ambiguous_or_incomplete_phases(tmp_path, change):
+    args = nat_launch_args(
+        tmp_path,
+        nat=False,
+        clean_binaural=True,
+        naturalistic_manifest=None,
+        naturalistic_manifest_sha256=None,
+    )
+    for key, value in change.items():
+        setattr(args, key, value)
+    with pytest.raises(ValueError):
+        validate_launch_options(args)
+
+
+def test_clean_handoff_seals_writer_and_imports_unchanged_full_state(tmp_path):
+    from scripts.train_segment import import_clean_curriculum
+    from src.data.sharded_audio_datamodule import data_state_sha256
+    from src.utils.runtime import file_sha256
+
+    client = CheckpointS3()
+    repo = repository(client, clean_binaural=True, global_batch=16)
+    repo.open(initialize=True)
+    original = tmp_path / "original.ckpt"
+    state = clean_curriculum_state()
+    torch.save(state, original)
+    receipt = repo.publish(original, 2, segment_id="segment-clean", data_seed=42)
+    with pytest.raises(ValueError, match="exited writer"):
+        repo.publish_clean_handoff(receipt, writer_finished=False)
+    handoff = repo.publish_clean_handoff(receipt, writer_finished=True)
+    assert handoff["ready_for_nat"] is True
+    for action in (
+        lambda: repo.open(initialize=False),
+        lambda: repo.publish(payload(tmp_path, 4), 4, segment_id="segment-late", data_seed=44),
+    ):
+        with pytest.raises(ValueError, match="sealed"):
+            action()
+    destination = tmp_path / "imported.ckpt"
+    step, imported_receipt, transition = import_clean_curriculum(
+        repo,
+        destination,
+        expected_checkpoint_sha256=file_sha256(original),
+        index_sha256="a" * 64,
+        target_manifest_sha256="b" * 64,
+    )
+    assert step == 2 and imported_receipt == receipt
+    assert destination.read_bytes() == original.read_bytes()
+    assert transition == {
+        "source_checkpoint_sha256": file_sha256(original),
+        "source_data_state_sha256": data_state_sha256(state["ShardedAudioDataModule"]),
+        "index_sha256": "a" * 64,
+        "target_manifest_sha256": "b" * 64,
+    }
+    restored = torch.load(destination, weights_only=True)
+    assert restored["optimizer_states"][0]["state"][0]["exp_avg"].item() == pytest.approx(0.7)
+    assert restored["lr_schedulers"][0]["last_epoch"] == 2
+    assert restored["loops"] == state["loops"]
+    with pytest.raises(ValueError, match="pinned source"):
+        repo.clean_handoff("c" * 64)
+    client.corrupt_checkpoint = True
+    with pytest.raises(ValueError, match="SHA256"):
+        import_clean_curriculum(
+            repo,
+            tmp_path / "corrupt.ckpt",
+            expected_checkpoint_sha256=file_sha256(original),
+            index_sha256="a" * 64,
+            target_manifest_sha256="b" * 64,
+        )
+
+
+@pytest.mark.parametrize("damage", ["mono", "nat", "crop", "optimizer", "ema", "schedule"])
+def test_clean_import_rejects_incompatible_state_even_with_valid_blob_checksum(tmp_path, damage):
+    from scripts.train_segment import import_clean_curriculum
+
+    state = clean_curriculum_state()
+    data = state["ShardedAudioDataModule"]
+    if damage in {"mono", "nat"}:
+        data["data_mode"] = damage
+    elif damage == "crop":
+        data["masked_crop_samples"] = 32000
+    elif damage == "optimizer":
+        state["optimizer_states"][0]["state"][0]["step"] = torch.tensor(1)
+    elif damage == "ema":
+        state["state_dict"]["ema_updates"] = torch.tensor(1)
+    elif damage == "schedule":
+        state["lr_schedulers"][0]["last_epoch"] = 1
+    original = tmp_path / "invalid.ckpt"
+    torch.save(state, original)
+    repo = repository(CheckpointS3(), clean_binaural=True, global_batch=16)
+    repo.open(initialize=True)
+    receipt = repo.publish(original, 2, segment_id="segment-clean", data_seed=42)
+    repo.publish_clean_handoff(receipt, writer_finished=True)
+    with pytest.raises(ValueError, match="recipe|complete matching"):
+        import_clean_curriculum(
+            repo,
+            tmp_path / "imported.ckpt",
+            expected_checkpoint_sha256=receipt["checkpoint"]["sha256"],
+            index_sha256="a" * 64,
+            target_manifest_sha256="b" * 64,
+        )
+
+
+def test_nat_destination_binds_clean_source_lineage(tmp_path):
+    client = CheckpointS3()
+    source = {
+        "run_id": "source-run-001",
+        "prefix": "training/source-run-001",
+        "checkpoint_sha256": "c" * 64,
+    }
+    repo = repository(
+        client, global_batch=16, naturalistic_manifest_sha256="b" * 64, curriculum_source=source
+    )
+    repo.open(initialize=True)
+    repo.publish(payload(tmp_path, 4), 4, segment_id="segment-nat", data_seed=44)
+    assert repo.owner["curriculum_source"] == source
+    with pytest.raises(ValueError, match="different run"):
+        repository(client, global_batch=16, naturalistic_manifest_sha256="b" * 64).open(
+            initialize=False
+        )

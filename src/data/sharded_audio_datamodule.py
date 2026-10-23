@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import wave
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -37,6 +38,13 @@ SPLITS = ("train", "val", "test")
 GIB = 1024**3
 SHA = re.compile(r"[a-f0-9]{64}")
 VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+def data_state_sha256(state: dict) -> str:
+    """Bind the original data state when the runner verifies a phase checkpoint."""
+    return hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
 
 
 class _ReadDeadlineExpired(BaseException):
@@ -367,7 +375,10 @@ def _decode(
     naturalistic=None,
     crops_per_recording: int = 0,
     crop_samples: int | None = None,
+    clean_binaural: bool = False,
 ):
+    if clean_binaural and naturalistic is not None:
+        raise ValueError("Clean binaural decoding cannot also render naturalistic assets")
     if len(raw) > 2 * sample_rate * 30 + 65536:
         raise ValueError("Audio member exceeds the 30 second preparation contract")
     with wave.open(io.BytesIO(raw), "rb") as handle:
@@ -385,7 +396,7 @@ def _decode(
         if random_crop and slack:
             digest = hashlib.blake2b(f"{seed}:{cycle}:{name}".encode(), digest_size=8).digest()
             offset = int.from_bytes(digest, "little") % (slack + 1)
-        full_clip = naturalistic is not None or crops_per_recording > 0
+        full_clip = clean_binaural or naturalistic is not None or crops_per_recording > 0
         handle.setpos(0 if full_clip else offset)
         read_samples = frames if full_clip else num_samples
         pcm = handle.readframes(read_samples)
@@ -400,6 +411,10 @@ def _decode(
         # Render the complete recording before selecting any excerpts. All crops
         # share one physical scene and retain the preceding reverberation tail.
         audio = naturalistic(audio, generator=generator)
+    elif clean_binaural:
+        # Keep the two-ear architecture while warming up on clean audio. Both
+        # chronological and masked crops originate from the same full recording.
+        audio = audio.repeat(2, 1)
     result = {"waveform": audio[..., offset : offset + num_samples] if full_clip else audio}
     if crops_per_recording:
         if crop_samples is None or crop_samples > frames:
@@ -503,6 +518,7 @@ class _AudioStream(IterableDataset):
                         naturalistic=naturalistic,
                         crops_per_recording=self.config.get("masked_crops_per_recording", 0),
                         crop_samples=self.config.get("masked_crop_samples"),
+                        clean_binaural=self.config.get("clean_binaural", False),
                     )
                     emitted += 1
                     if self.quota is not None and emitted >= self.quota:
@@ -548,6 +564,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
         masked_crops_per_recording: int = 0,
         masked_crop_samples: int | None = None,
         naturalistic_cache_gib: float = 12,
+        clean_binaural: bool = False,
+        clean_to_nat_transition: dict[str, str] | None = None,
     ):
         super().__init__()
         for key, value in {
@@ -584,6 +602,27 @@ class ShardedAudioDataModule(L.LightningDataModule):
             not isinstance(naturalistic_manifest, str) or not naturalistic_manifest
         ):
             raise ValueError("naturalistic_manifest must be an explicit local manifest path")
+        if clean_binaural and naturalistic_manifest is not None:
+            raise ValueError("clean_binaural and naturalistic_manifest are mutually exclusive")
+        if clean_to_nat_transition is not None:
+            required = {
+                "source_checkpoint_sha256",
+                "source_data_state_sha256",
+                "index_sha256",
+                "target_manifest_sha256",
+            }
+            if (
+                naturalistic_manifest is None
+                or clean_binaural
+                or not isinstance(clean_to_nat_transition, Mapping)
+                or set(clean_to_nat_transition) != required
+                or any(
+                    not isinstance(value, str) or not SHA.fullmatch(value)
+                    for value in clean_to_nat_transition.values()
+                )
+            ):
+                raise ValueError("Clean-to-Nat transition requires a pinned source and Nat target")
+            clean_to_nat_transition = dict(clean_to_nat_transition)
         if prefetch_factor is not None:
             _positive_integer(prefetch_factor, "prefetch_factor")
         if num_workers == 0 and (persistent_workers or prefetch_factor is not None):
@@ -610,6 +649,7 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "train_drop_last": train_drop_last,
             "allow_partial_index": allow_partial_index,
             "allow_stream_restart_on_resume": allow_stream_restart_on_resume,
+            "clean_binaural": clean_binaural,
         }.items():
             if type(value) is not bool:
                 raise ValueError(f"{name} must be a boolean")
@@ -722,13 +762,43 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "naturalistic_sha256": self.naturalistic_sha256,
             "masked_crops_per_recording": self.hparams.masked_crops_per_recording,
             "masked_crop_samples": self.hparams.masked_crop_samples,
+            "data_mode": self.data_mode,
         }
+
+    @property
+    def data_mode(self):
+        if self.hparams.naturalistic_manifest is not None:
+            return "naturalistic"
+        return "clean_binaural" if self.hparams.clean_binaural else "mono"
 
     def _check_resume(self, state):
         if state.get("index_sha256") != self.index_sha256:
             raise ValueError("Checkpoint was trained with a different staged data index")
+        old_mode = state.get(
+            "data_mode", "naturalistic" if state.get("naturalistic_sha256") else "mono"
+        )
+        transition = self.hparams.clean_to_nat_transition
+        phase_transition = False
+        if transition is not None:
+            # The segment runner verifies the entire original checkpoint against
+            # source_checkpoint_sha256 before Lightning sees it. Here we bind
+            # that checkpoint's exact data state and the one permitted new phase.
+            phase_transition = (
+                old_mode == "clean_binaural"
+                and self.data_mode == "naturalistic"
+                and state.get("naturalistic_sha256") is None
+                and transition["index_sha256"] == self.index_sha256
+                and transition["target_manifest_sha256"] == self.naturalistic_sha256
+                and transition["source_data_state_sha256"] == data_state_sha256(state)
+            )
+            if not phase_transition:
+                raise ValueError("Checkpoint does not match the pinned clean-to-Nat transition")
         if (
-            state.get("naturalistic_sha256") != self.naturalistic_sha256
+            (not phase_transition and old_mode != self.data_mode)
+            or (
+                not phase_transition
+                and state.get("naturalistic_sha256") != self.naturalistic_sha256
+            )
             or state.get("masked_crops_per_recording", 0) != self.hparams.masked_crops_per_recording
             or state.get("masked_crop_samples") != self.hparams.masked_crop_samples
         ):

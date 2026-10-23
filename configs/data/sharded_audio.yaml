@@ -29,6 +29,10 @@ allow_partial_index: false
 allow_stream_restart_on_resume: false
 # Optional explicit binaural scenes and independently sampled masked crops.
 naturalistic_manifest: null
+# Explicit clean first phase of a binaural curriculum; never a Nat fallback.
+clean_binaural: false
+# Set only by the production runner after verifying the original checkpoint.
+clean_to_nat_transition: null
 masked_crops_per_recording: 0
 masked_crop_samples: null
 naturalistic_cache_gib: 12

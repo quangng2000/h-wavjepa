@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - audioset_nat_h100_four
+  - _self_
+
+# Clean first phase of a clean-to-Nat curriculum, using the exact Nat model,
+# optimizer schedule, global 16-recording batch and 128 masked-crop recipe.
+# The two ears receive identical audio until an explicit checkpoint transition.
+tags: [audioset, clean-to-nat, clean-binaural, temporal-aggregation, four-h100, unbenchmarked]
+data:
+  naturalistic_manifest: null
+  clean_binaural: true
