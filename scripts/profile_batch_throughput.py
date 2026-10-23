@@ -29,7 +29,7 @@ import torch.distributed as dist  # noqa: E402
 
 from src.utils.runtime import atomic_json, file_sha256  # noqa: E402
 
-CANDIDATES = (16, 32, 64, 128)
+CANDIDATES = (16, 32, 64, 96, 128, 144, 160, 192, 256)
 
 
 def source_base_seed(source):
@@ -46,7 +46,7 @@ def source_base_seed(source):
 
 def validate_profile(value):
     if type(value.get("global_batch")) is not int or value["global_batch"] not in CANDIDATES:
-        raise ValueError("Global batch must be one of 16, 32, 64, 128")
+        raise ValueError(f"Global batch must be one of {', '.join(map(str, CANDIDATES))}")
     for name, low, high in (("warmup", 1, 10), ("measured", 1, 50), ("timeout_seconds", 30, 600)):
         if type(value.get(name)) is not int or not low <= value[name] <= high:
             raise ValueError(f"Invalid bounded profile {name}")

@@ -66,7 +66,7 @@ def rank_report(request, rank):
     }
 
 
-@pytest.mark.parametrize("batch", [16, 32, 64, 128])
+@pytest.mark.parametrize("batch", [16, 32, 64, 96, 128, 144, 160, 192, 256])
 def test_candidate_retains_full_recipe_and_only_timing_callback(tmp_path, batch):
     request = value(tmp_path) | {"global_batch": batch}
     original = deepcopy(request)
@@ -102,6 +102,15 @@ def test_candidate_retains_full_recipe_and_only_timing_callback(tmp_path, batch)
     callbacks = OmegaConf.to_container(cfg.callbacks, resolve=True)
     assert "_target_" not in callbacks["timing"]["profile"]["source_plan"]["operator_stop"]
     assert cfg.paths.output_dir == str(tmp_path / "profile" / "run")
+
+
+def test_winner_can_run_fifty_measured_updates_without_changing_schedule(tmp_path):
+    request = value(tmp_path) | {"global_batch": 144, "measured": 50}
+    cfg = profile.profile_config(request)
+    assert cfg.trainer.max_steps == 553
+    assert cfg.callbacks.timing.profile.measured == 50
+    assert cfg.model.lr_total_steps == 375000
+    assert cfg.trainer.enable_checkpointing is False
 
 
 @pytest.mark.parametrize(
