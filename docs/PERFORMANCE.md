@@ -136,6 +136,19 @@ torchrun --standalone --nproc_per_node=4 scripts/benchmark_streaming_gpu.py \
   --output /output/streaming-benchmark --scratch-parent /tmp
 ```
 
+For a durable checkpoint acceptance run, add
+`--checkpoint-bucket <private-bucket> --checkpoint-prefix probes/<unique-run-id>`
+and `--checkpoint-run-id <unique-run-id> --exclusive-checkpoint-writer`.
+Inject the separate `HWAVJEPA_CHECKPOINT_*` credentials described in
+[bounded training segments](TRAINING_SEGMENTS.md). This four-GPU, one-worker
+mode publishes the full checkpoint, verifies a complete remote readback, then
+downloads it independently and checks its SHA256, model tensors and metadata.
+Its default `--checkpoint-transfer-timeout-seconds 600` covers that entire
+roundtrip; DDP collectives allow another 120 seconds. The report records separate
+publication/readback and download timings. Both local checkpoint copies remain
+under scratch, while the verified remote checkpoint is retained under the probe
+prefix. Use a fresh production prefix for the completed dataset's different hash.
+
 These scripts do not provision resources or authorize spending. An external job
 must impose a runtime/cost bound. A passing local-pilot benchmark alone does not
 establish full-corpus end-to-end throughput.

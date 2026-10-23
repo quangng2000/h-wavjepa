@@ -1,22 +1,50 @@
 """CPU checks for the GPU probe's real config, lifecycle and success evidence."""
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import lightning as L
 import pytest
 import torch
+from hydra.utils import instantiate
+from test_stage_audioset import FakeS3
 from torch.utils.data import DataLoader
 
 from scripts.benchmark_streaming_gpu import (
+    collective_timeout_seconds,
+    durable_checkpoint_options,
+    durable_checkpoint_roundtrip,
     finite_metrics,
     make_config,
+    open_checkpoint_repository,
     summarize,
     verify_checkpoint,
     worker_facts,
 )
 from src.utils.runtime import validate_config
+
+
+def durable_args(tmp_path, **changes):
+    return SimpleNamespace(
+        **{
+            "output": tmp_path,
+            "endpoint": "https://storage.example.invalid",
+            "devices": 4,
+            "workers": 1,
+            "steps": 400,
+            "warmup": 25,
+            "compact": True,
+            "checkpoint_bucket": "checkpoint-probes",
+            "checkpoint_prefix": "probes/streaming-probe-001",
+            "checkpoint_run_id": "streaming-probe-001",
+            "checkpoint_endpoint": "https://storage.example.invalid",
+            "checkpoint_transfer_timeout_seconds": 600,
+            "exclusive_checkpoint_writer": True,
+            **changes,
+        }
+    )
 
 
 def test_worker_evidence_reads_actual_loader_context():
@@ -56,7 +84,7 @@ def test_streaming_gpu_config_preserves_global_batch_objective_and_full_schedule
     assert cfg.trainer.limit_val_batches == 0 and cfg.test is False
 
 
-def test_full_checkpoint_after_validation_preserves_training_and_data_state(tmp_path):
+def test_full_checkpoint_after_validation_preserves_training_and_data_state(tmp_path, monkeypatch):
     from test_hierarchical_dynamics import model_factory
 
     class FixtureData(L.LightningDataModule):
@@ -96,17 +124,40 @@ def test_full_checkpoint_after_validation_preserves_training_and_data_state(tmp_
     trainer.save_checkpoint(path, weights_only=False)
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     verify_checkpoint(checkpoint, model, data, 2)
+    client = FakeS3()
+    monkeypatch.setattr(
+        "scripts.benchmark_streaming_gpu.checkpoint_client", lambda endpoint: client
+    )
+    repository = open_checkpoint_repository(
+        durable_args(tmp_path), {"frozen_index_sha256": "a" * 64}
+    )
+    report = durable_checkpoint_roundtrip(repository, path, model, data, 2, 600)
+    assert report["complete_remote_readback_verified"] is True
+    assert report["download_sha256_verified"] is True
+    assert report["strict_tensor_and_metadata_roundtrip"] is True
+    assert report["receipt"]["checkpoint"]["step"] == 2
+    assert report["receipt"]["checkpoint"]["bytes"] == path.stat().st_size
+    assert client.objects[report["receipt"]["checkpoint"]["key"]] == path.read_bytes()
+    assert not path.with_name("downloaded-checkpoint.ckpt").exists()
+    for name in (
+        "upload_and_full_readback_seconds",
+        "download_and_sha256_seconds",
+        "downloaded_tensor_and_metadata_verify_seconds",
+        "total_seconds",
+    ):
+        assert report[name] > 0
     checkpoint[type(data).__qualname__] = {"index_sha256": "wrong"}
     with pytest.raises(RuntimeError, match="data-index"):
         verify_checkpoint(checkpoint, model, data, 2)
 
 
-def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_path):
+@pytest.mark.parametrize("devices", [2, 4])
+def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_path, devices):
     frozen = {"frozen_index_sha256": "a" * 64, "validation_used_clips": 128}
-    for rank in range(2):
+    for rank in range(devices):
         identity = {
             "rank": rank,
-            "world_size": 2,
+            "world_size": devices,
             "optimizer_steps": 400,
             "ema_updates": 400,
             **frozen,
@@ -127,37 +178,58 @@ def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_pa
             )
         )
         (tmp_path / f"validation-rank-{rank}.json").write_text(
-            json.dumps({**identity, "clips": 64, "metrics": {"val/loss": 1.0}})
+            json.dumps({**identity, "clips": 128 // devices, "metrics": {"val/loss": 1.0}})
         )
-    (tmp_path / "checkpoint.json").write_text(
-        json.dumps(
-            {
-                "strict_tensor_and_metadata_roundtrip": True,
-                "bytes": 1024,
-            }
-        )
-    )
-    result = summarize(tmp_path, 2, 400, frozen)
-    assert result["seconds_per_update"] == 0.6
+    checkpoint = {"strict_tensor_and_metadata_roundtrip": True, "bytes": 1024}
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text(json.dumps(checkpoint))
+    if devices == 4:
+        with pytest.raises(RuntimeError, match="Durable S3 checkpoint"):
+            summarize(tmp_path, devices, 400, frozen, require_durable_checkpoint=True)
+        durable = {
+            "complete_remote_readback_verified": True,
+            "download_sha256_verified": True,
+            "strict_tensor_and_metadata_roundtrip": True,
+            "receipt": {
+                "owner": {"index_sha256": frozen["frozen_index_sha256"]},
+                "checkpoint": {"step": 400, "bytes": 1024},
+            },
+        }
+        checkpoint["durable_s3"] = durable
+        checkpoint_path.write_text(json.dumps(checkpoint))
+        assert summarize(tmp_path, devices, 400, frozen, require_durable_checkpoint=True)["ok"]
+        for field in (
+            "complete_remote_readback_verified",
+            "download_sha256_verified",
+            "strict_tensor_and_metadata_roundtrip",
+        ):
+            durable[field] = False
+            checkpoint_path.write_text(json.dumps(checkpoint))
+            with pytest.raises(RuntimeError, match="Durable S3 checkpoint"):
+                summarize(tmp_path, devices, 400, frozen, require_durable_checkpoint=True)
+            durable[field] = True
+        checkpoint_path.write_text(json.dumps(checkpoint))
+    result = summarize(tmp_path, devices, 400, frozen, require_durable_checkpoint=devices == 4)
+    assert result["seconds_per_update"] == pytest.approx(0.5 + (devices - 1) * 0.1)
     train_path = tmp_path / "rank-1.json"
     original_train = train_path.read_text()
     no_refill = json.loads(original_train)
     no_refill["rank_cache_at_train_end"]["verified_files"] = 1
     train_path.write_text(json.dumps(no_refill))
     with pytest.raises(RuntimeError, match="additional verified shard downloads"):
-        summarize(tmp_path, 2, 400, frozen)
+        summarize(tmp_path, devices, 400, frozen)
     train_path.write_text(original_train)
     wrong_workers = json.loads(original_train)
     wrong_workers["data_worker_start_method"] = "fork"
     train_path.write_text(json.dumps(wrong_workers))
     with pytest.raises(RuntimeError, match="spawned input-worker"):
-        summarize(tmp_path, 2, 400, frozen)
+        summarize(tmp_path, devices, 400, frozen)
     train_path.write_text(original_train)
     damaged = json.loads((tmp_path / "validation-rank-1.json").read_text())
     damaged["ema_updates"] = 399
     (tmp_path / "validation-rank-1.json").write_text(json.dumps(damaged))
     with pytest.raises(RuntimeError, match="Rank reports disagree"):
-        summarize(tmp_path, 2, 400, frozen)
+        summarize(tmp_path, devices, 400, frozen)
     with pytest.raises(RuntimeError, match="nonfinite"):
         finite_metrics([{"val/loss": float("nan")}])
 
@@ -175,3 +247,86 @@ def test_scratch_is_unique_and_outside_artifact_tree_even_if_cleanup_never_runs(
     for forbidden in (output, output / "nested", Path("/output/cache")):
         with pytest.raises(ValueError, match="outside /output"):
             scratch_directory(forbidden, output)
+
+
+@pytest.mark.parametrize("seconds", [30, 600, 900.25])
+def test_durable_probe_uses_same_transfer_timeout_for_nccl_and_lightning(tmp_path, seconds):
+    args = durable_args(tmp_path, checkpoint_transfer_timeout_seconds=seconds)
+    cfg = make_config(
+        args, {"path": "/tmp/frozen.json", "frozen_index_sha256": "a" * 64}, tmp_path / "cache"
+    )
+    strategy = instantiate(cfg.trainer.strategy)
+    assert strategy._timeout == timedelta(seconds=collective_timeout_seconds(args))
+    assert strategy._timeout.total_seconds() >= seconds + 120
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"checkpoint_prefix": None},
+        {"exclusive_checkpoint_writer": False},
+        {"devices": 2},
+        {"workers": 2},
+        {"checkpoint_transfer_timeout_seconds": 0},
+        {"checkpoint_transfer_timeout_seconds": float("nan")},
+    ],
+)
+def test_durable_probe_rejects_incomplete_or_weaker_configuration(tmp_path, changes):
+    with pytest.raises(ValueError):
+        durable_checkpoint_options(durable_args(tmp_path, **changes))
+
+
+def test_checkpoint_probe_refuses_a_foreign_prefix(tmp_path, monkeypatch):
+    client = FakeS3()
+    monkeypatch.setattr(
+        "scripts.benchmark_streaming_gpu.checkpoint_client", lambda endpoint: client
+    )
+    args = durable_args(tmp_path)
+    client.objects[args.checkpoint_prefix + "/foreign"] = b"preserve"
+    with pytest.raises(ValueError, match="unowned/nonempty"):
+        open_checkpoint_repository(args, {"frozen_index_sha256": "a" * 64})
+    assert client.objects[args.checkpoint_prefix + "/foreign"] == b"preserve"
+
+
+@pytest.mark.parametrize("failure", ["readback", "download", "timeout"])
+def test_durable_probe_failure_never_returns_success_evidence(tmp_path, monkeypatch, failure):
+    import io
+
+    class DamagedS3(FakeS3):
+        checkpoint_reads = 0
+
+        def get_object(self, **kwargs):
+            result = super().get_object(**kwargs)
+            if kwargs["Key"].endswith(".ckpt"):
+                self.checkpoint_reads += 1
+                corrupt_at = {"readback": 1, "download": 2}.get(failure)
+                if self.checkpoint_reads == corrupt_at:
+                    payload = result["Body"].read()
+                    result["Body"] = io.BytesIO(bytes([payload[0] ^ 1]) + payload[1:])
+            return result
+
+    client = DamagedS3()
+    monkeypatch.setattr(
+        "scripts.benchmark_streaming_gpu.checkpoint_client", lambda endpoint: client
+    )
+    repository = open_checkpoint_repository(
+        durable_args(tmp_path), {"frozen_index_sha256": "a" * 64}
+    )
+    path = tmp_path / "checkpoint.ckpt"
+    path.write_bytes(b"checkpoint fixture: fails before deserialization")
+    clock = [0]
+    if failure == "timeout":
+        monkeypatch.setattr("scripts.benchmark_streaming_gpu.time.monotonic", lambda: clock[0])
+        publish = repository.publish
+
+        def late_publication(*args, **kwargs):
+            result = publish(*args, **kwargs)
+            clock[0] = 11
+            return result
+
+        monkeypatch.setattr(repository, "publish", late_publication)
+    with pytest.raises((ValueError, TimeoutError), match="checksum|SHA256|transfer budget"):
+        durable_checkpoint_roundtrip(repository, path, None, None, 2, 10)
+    assert not path.with_name("downloaded-checkpoint.ckpt").exists()
+    assert not path.with_name("downloaded-checkpoint.partial").exists()
+    assert not (tmp_path / "streaming-benchmark-success.json").exists()

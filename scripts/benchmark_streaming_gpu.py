@@ -6,7 +6,8 @@ Example: torchrun --standalone --nproc_per_node=2 scripts/benchmark_streaming_gp
 The caller must bound the cloud job's runtime and spending. This script rents no
 resources, downloads no model weights, and never launches another process group.
 It measures training with real shard refills, then full available validation and
-a local checkpoint roundtrip. A partial index remains explicitly a partial pilot.
+a local checkpoint roundtrip, optionally followed by private-S3 publication and
+verified download. A partial index remains explicitly a partial pilot.
 """
 
 from __future__ import annotations
@@ -35,6 +36,55 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.benchmark_gpu import atomic_report  # noqa: E402
+from scripts.segment_checkpoint import (  # noqa: E402
+    CheckpointRepository,
+    checkpoint_client,
+    minimum_checkpoint_collective_timeout,
+)
+
+
+def durable_checkpoint_options(args) -> dict | None:
+    fields = ("checkpoint_bucket", "checkpoint_prefix", "checkpoint_run_id")
+    values = [getattr(args, field, None) for field in fields]
+    exclusive = getattr(args, "exclusive_checkpoint_writer", False)
+    if not any(values) and not exclusive:
+        return None
+    if not all(values) or not exclusive:
+        raise ValueError(
+            "Durable probe requires checkpoint bucket, prefix, run ID and exclusive writer"
+        )
+    if args.devices != 4 or args.workers != 1:
+        raise ValueError("Durable acceptance requires four GPUs and one spawned worker per rank")
+    minimum_checkpoint_collective_timeout(args.checkpoint_transfer_timeout_seconds)
+    return dict(zip(("bucket", "prefix", "run_id"), values, strict=True))
+
+
+def collective_timeout_seconds(args) -> int:
+    if durable_checkpoint_options(args) is None:
+        return 180
+    return max(180, minimum_checkpoint_collective_timeout(args.checkpoint_transfer_timeout_seconds))
+
+
+def open_checkpoint_repository(args, frozen: dict) -> CheckpointRepository | None:
+    """Validate separate credentials and an empty owned probe prefix before training."""
+    options = durable_checkpoint_options(args)
+    if options is None:
+        return None
+    deadline = time.monotonic() + args.checkpoint_transfer_timeout_seconds
+
+    def check():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Checkpoint probe setup exceeded its transfer budget")
+
+    repository = CheckpointRepository(
+        checkpoint_client(args.checkpoint_endpoint),
+        **options,
+        index_sha256=frozen["frozen_index_sha256"],
+        check=check,
+    )
+    repository.open(initialize=True)
+    check()
+    return repository
 
 
 def scratch_directory(parent: Path, output: Path) -> Path:
@@ -136,6 +186,10 @@ def make_config(args, frozen: dict, cache: Path):
     cfg.trainer.enable_checkpointing = False
     cfg.trainer.enable_progress_bar = False
     cfg.trainer.enable_model_summary = False
+    cfg.trainer.strategy.timeout = {
+        "_target_": "datetime.timedelta",
+        "seconds": collective_timeout_seconds(args),
+    }
     cfg.model.backbone.config.use_gradient_checkpointing = False
     cfg.model.backbone.config.compact_masked_tokens = args.compact
     cfg.ckpt_path, cfg.train, cfg.test = None, True, False
@@ -279,7 +333,71 @@ def verify_checkpoint(checkpoint, model, datamodule, steps: int) -> None:
     model.load_state_dict(saved, strict=True)
 
 
-def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
+def durable_checkpoint_roundtrip(
+    repository: CheckpointRepository,
+    checkpoint_path: Path,
+    model,
+    datamodule,
+    steps: int,
+    transfer_timeout_seconds: float,
+) -> dict:
+    """Measure complete publication/readback and independent download verification.
+
+    One cooperative budget covers this entire operation. The outer cloud job and
+    its collective timeout remain the backstops for a blocked SDK request.
+    """
+    minimum_checkpoint_collective_timeout(transfer_timeout_seconds)
+    started = time.perf_counter()
+    deadline = time.monotonic() + transfer_timeout_seconds
+
+    def check():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Checkpoint probe exceeded its transfer budget")
+
+    repository.store.check = check
+    check()
+    receipt = repository.publish(
+        checkpoint_path, steps, segment_id="streaming-probe", data_seed=repository.base_data_seed
+    )
+    check()
+    upload_and_readback_seconds = time.perf_counter() - started
+    downloaded = checkpoint_path.with_name("downloaded-checkpoint.ckpt")
+    download_started = time.perf_counter()
+    try:
+        restored_receipt = repository.download_latest(downloaded)
+        check()
+        if restored_receipt != receipt:
+            raise RuntimeError("Checkpoint probe receipt changed before independent download")
+        download_seconds = time.perf_counter() - download_started
+        verify_started = time.perf_counter()
+        restored = torch.load(downloaded, map_location="cpu", weights_only=True)
+        verify_checkpoint(restored, model, datamodule, steps)
+        del restored
+        check()
+        return {
+            "upload_and_full_readback_seconds": upload_and_readback_seconds,
+            "download_and_sha256_seconds": download_seconds,
+            "downloaded_tensor_and_metadata_verify_seconds": time.perf_counter() - verify_started,
+            "total_seconds": time.perf_counter() - started,
+            "transfer_timeout_seconds": transfer_timeout_seconds,
+            "budget_scope": "publication, full remote readback, independent download and verification",
+            "complete_remote_readback_verified": True,
+            "download_sha256_verified": True,
+            "strict_tensor_and_metadata_roundtrip": True,
+            "receipt": receipt,
+        }
+    finally:
+        downloaded.unlink(missing_ok=True)
+
+
+def summarize(
+    output: Path,
+    devices: int,
+    steps: int,
+    frozen: dict,
+    *,
+    require_durable_checkpoint: bool = False,
+) -> dict:
     ranks = [json.loads((output / f"rank-{rank}.json").read_text()) for rank in range(devices)]
     validation = [
         json.loads((output / f"validation-rank-{rank}.json").read_text()) for rank in range(devices)
@@ -322,6 +440,25 @@ def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
         or checkpoint.get("bytes", 0) <= 0
     ):
         raise RuntimeError("Checkpoint roundtrip evidence is missing")
+    if require_durable_checkpoint:
+        durable = checkpoint.get("durable_s3", {})
+        receipt = durable.get("receipt", {})
+        if (
+            devices != 4
+            or ranks[0]["workers_per_rank"] != 1
+            or any(
+                durable.get(field) is not True
+                for field in (
+                    "complete_remote_readback_verified",
+                    "download_sha256_verified",
+                    "strict_tensor_and_metadata_roundtrip",
+                )
+            )
+            or receipt.get("owner", {}).get("index_sha256") != frozen["frozen_index_sha256"]
+            or receipt.get("checkpoint", {}).get("step") != steps
+            or receipt.get("checkpoint", {}).get("bytes") != checkpoint["bytes"]
+        ):
+            raise RuntimeError("Durable S3 checkpoint roundtrip evidence is missing or mismatched")
     return {
         "ok": True,
         "data_worker_start_method": "spawn",
@@ -336,6 +473,7 @@ def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
         "standard_batch_gpu_cost_usd": seconds * 375000 / 60 * devices * 0.063,
         "cache_refills_observed_on_all_ranks": True,
         "checkpoint": checkpoint,
+        "durable_checkpoint_required": require_durable_checkpoint,
         "limitations": [
             "Only the frozen verified cohort was sampled; partial staging is not the full dataset.",
             "Short measured cache refills cannot guarantee long-run storage or GPU throughput.",
@@ -348,14 +486,17 @@ def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
 def run(args):
     from src.train import train
 
+    checkpoint_required = durable_checkpoint_options(args) is not None
+    collective_seconds = collective_timeout_seconds(args)
     rank, local_rank, world = (int(os.environ[key]) for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"))
     if world != args.devices or torch.cuda.device_count() < args.devices:
         raise ValueError("Launch with torchrun and the requested two or four visible CUDA devices")
     torch.cuda.set_device(local_rank)
     if not torch.cuda.is_bf16_supported():
         raise RuntimeError("The streaming benchmark requires BF16-capable CUDA hardware")
-    dist.init_process_group("nccl", timeout=timedelta(seconds=180))
+    dist.init_process_group("nccl", timeout=timedelta(seconds=collective_seconds))
     setup = [None]
+    repository = None
     if rank == 0:
         scratch = None
         try:
@@ -367,6 +508,7 @@ def run(args):
                     args.output, args.endpoint, devices=world, workers=args.workers
                 ),
             }
+            repository = open_checkpoint_repository(args, setup[0]["frozen"])
         except Exception as error:
             if scratch is not None:
                 shutil.rmtree(scratch, ignore_errors=True)
@@ -446,26 +588,58 @@ def run(args):
             print("streaming checkpoint save and verification start", flush=True)
         trainer.save_checkpoint(checkpoint_path, weights_only=False)
         dist.barrier()
+        checkpoint_outcome = [None]
         if rank == 0:
-            saved_seconds = time.perf_counter() - saved_at
-            loaded_at = time.perf_counter()
-            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-            verify_checkpoint(checkpoint, model, datamodule, args.steps)
-            atomic_report(
-                args.output / "checkpoint.json",
-                {
+            try:
+                saved_seconds = time.perf_counter() - saved_at
+                loaded_at = time.perf_counter()
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                verify_checkpoint(checkpoint, model, datamodule, args.steps)
+                checkpoint_report = {
                     "save_seconds": saved_seconds,
                     "load_verify_seconds": time.perf_counter() - loaded_at,
                     "bytes": checkpoint_path.stat().st_size,
                     "strict_tensor_and_metadata_roundtrip": True,
                     "stream_positions_checkpointed": False,
-                },
+                }
+                del checkpoint
+                if repository is not None:
+                    print("streaming durable checkpoint publication and download start", flush=True)
+                    atomic_report(
+                        args.output / "checkpoint-progress.json",
+                        {"ok": False, "stage": "durable_checkpoint_incomplete"},
+                    )
+                    checkpoint_report["durable_s3"] = durable_checkpoint_roundtrip(
+                        repository,
+                        checkpoint_path,
+                        model,
+                        datamodule,
+                        args.steps,
+                        args.checkpoint_transfer_timeout_seconds,
+                    )
+                atomic_report(args.output / "checkpoint.json", checkpoint_report)
+                checkpoint_path.unlink()
+                checkpoint_outcome[0] = {"ok": True}
+            except Exception as error:
+                # SDK exceptions can include signed URLs; only share their class.
+                checkpoint_outcome[0] = {"error": type(error).__name__}
+                atomic_report(
+                    args.output / "checkpoint-failure.json",
+                    {"ok": False, "stage": "checkpoint", **checkpoint_outcome[0]},
+                )
+        dist.broadcast_object_list(checkpoint_outcome, src=0)
+        if "error" in checkpoint_outcome[0]:
+            raise RuntimeError(
+                f"Streaming checkpoint verification failed ({checkpoint_outcome[0]['error']})"
             )
-            del checkpoint
-            checkpoint_path.unlink()
-        dist.barrier()
         if rank == 0:
-            summary = summarize(args.output, world, args.steps, frozen)
+            summary = summarize(
+                args.output,
+                world,
+                args.steps,
+                frozen,
+                require_durable_checkpoint=checkpoint_required,
+            )
             summary["compact_masked_tokens"] = args.compact
             summary["workers_per_rank"] = args.workers
             summary["hardware"] = {
@@ -502,9 +676,24 @@ def main():
         "--endpoint",
         default=os.environ.get("HWAVJEPA_S3_ENDPOINT", "https://storage.givemeanode.com"),
     )
+    parser.add_argument("--checkpoint-bucket")
+    parser.add_argument("--checkpoint-prefix")
+    parser.add_argument("--checkpoint-run-id")
+    parser.add_argument("--exclusive-checkpoint-writer", action="store_true")
+    parser.add_argument("--checkpoint-endpoint", default="https://storage.givemeanode.com")
+    parser.add_argument(
+        "--checkpoint-transfer-timeout-seconds",
+        type=float,
+        default=600,
+        help="Combined publication, full readback, download and strict verification budget",
+    )
     args = parser.parse_args()
     if not 1 <= args.warmup < args.steps <= 1000 or not 1 <= args.workers <= 4:
         parser.error("Require 1 <= warmup < steps <= 1000 and 1 <= workers <= 4")
+    try:
+        durable_checkpoint_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     args.output = args.output.expanduser().resolve()
     run(args)
 
