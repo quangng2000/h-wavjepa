@@ -58,7 +58,12 @@ completed prediction directory; use a new export for a new evaluation protocol.
 `--prepare-only` runs the official label alignment and memmap packaging without
 training a probe. The evaluator writes its normal `test.predicted-scores.json`
 and `prediction-done.json`, plus upstream provenance. Export provenance records
-the checkpoint SHA-256, representation, and audio-window settings.
+the checkpoint SHA-256, representation, audio-window settings, saved
+`readout_mode`, configured `average_top_k_layers`, and `hierarchy` flag.
+`representation_readout` distinguishes the chosen window readout from the
+`backbone` representation's final-layer tokens. With a flat checkpoint,
+`duplicate_levels` explicitly lists `low`, `medium`, and `high`: these are
+identical features and must not be reported as three distinct learned spaces.
 
 ## Representation and timing
 
@@ -115,3 +120,6 @@ task-specific grid is only an integration test, not a benchmark protocol or a
 representation-quality result. Real comparisons need the same held-out task
 splits, evaluation grid, and data preparation across baseline, flat, and
 hierarchical checkpoints, with results reported separately for each readout.
+Regression tests use multiple encoder layers and a nonidentity final LayerNorm
+to distinguish normalized top-k from legacy readouts, including checkpoints
+saved before the readout-mode field existed.

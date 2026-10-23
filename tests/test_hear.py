@@ -18,16 +18,43 @@ def encoder(make_config):
     return hydra.utils.instantiate(config.model).eval()
 
 
+@pytest.fixture
+def multilayer_encoder(make_config):
+    config = make_config(["experiment=upstream_smoke"])
+    config.model.backbone.config.encoder_layers = 3
+    config.model.backbone.config.average_top_k_layers = 2
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(103)
+        encoder = hydra.utils.instantiate(config.model).eval()
+    # Random post-norm top-k=1 fixtures can hide the wrong readout: the final
+    # encoder norm is nearly an identity at initialization. Give it a visibly
+    # different affine transform as a trained checkpoint can have.
+    with torch.no_grad():
+        norm = encoder.backbone.model.encoder.norm
+        norm.weight.copy_(torch.linspace(0.4, 1.6, norm.weight.numel()))
+        norm.bias.copy_(torch.linspace(-0.7, 0.3, norm.bias.numel()))
+    return encoder
+
+
 def audio(samples, batch=2):
     return torch.rand(batch, samples) * 2 - 1
 
 
 @pytest.mark.parametrize("representation,index", [("low", 0), ("medium", 1), ("high", 2)])
-def test_scene_and_timestamp_levels_match_dense_encoder(encoder, representation, index):
+@pytest.mark.parametrize("readout_mode", ["legacy", "normalized_top_k"])
+def test_scene_and_timestamp_levels_match_dense_encoder(
+    multilayer_encoder, representation, index, readout_mode
+):
+    encoder = multilayer_encoder
+    encoder.readout_mode = readout_mode
     model = HEARModel(encoder, representation, window_batch_size=2)
     inputs = audio(512 * 5)
     original = inputs.clone()
     expected = encoder.encode(inputs)[index].detach()
+    alternative = "legacy" if readout_mode == "normalized_top_k" else "normalized_top_k"
+    wrong_low = encoder.backbone.encode_windows(encoder._windows(inputs), readout_mode=alternative)
+    wrong_levels = encoder._levels(wrong_low, encoder.abstractions)
+    assert (expected - wrong_levels[index]).abs().max() > 0.01
     timestamps, times = get_timestamp_embeddings(inputs, model)
     torch.testing.assert_close(timestamps, expected)
     torch.testing.assert_close(get_scene_embeddings(inputs, model), expected.mean(1))
@@ -136,6 +163,29 @@ def test_loader_round_trip_and_option_validation(encoder, tmp_path):
         get_scene_embeddings(inputs, loaded)
 
 
+@pytest.mark.parametrize("saved_mode", ["legacy", "normalized_top_k", None])
+def test_hear_checkpoint_loading_preserves_readout_semantics(
+    multilayer_encoder, saved_mode, tmp_path
+):
+    encoder = multilayer_encoder
+    expected_mode = saved_mode or "legacy"
+    encoder.readout_mode = expected_mode
+    encoder.config["readout_mode"] = expected_mode
+    checkpoint = {"state_dict": deepcopy(encoder.state_dict())}
+    encoder.on_save_checkpoint(checkpoint)
+    if saved_mode is None:
+        checkpoint[encoder.CHECKPOINT_KEY]["dynamics"].pop("readout_mode")
+    path = tmp_path / "model.ckpt"
+    torch.save(checkpoint, path)
+    inputs = audio(1024)
+    expected = encoder.encode(inputs)
+    for index, representation in enumerate(("low", "medium", "high")):
+        loaded = load_model(path, representation=representation)
+        assert loaded.encoder.readout_mode == expected_mode
+        values, _ = get_timestamp_embeddings(inputs, loaded)
+        torch.testing.assert_close(values, expected[index])
+
+
 def make_task(tmp_path, embedding_type="scene"):
     sf = pytest.importorskip("soundfile")
     task = tmp_path / "task"
@@ -162,6 +212,11 @@ def test_export_preserves_variable_lengths_and_task_splits(encoder, tmp_path, em
     assert manifest["temporal_grid"] == "native_tokens"
     assert manifest["timestamp_hop_samples"] == encoder.backbone.stride_samples
     assert manifest["training_state_strides"] == [1, 2, 4]
+    assert manifest["readout_mode"] == encoder.readout_mode
+    assert manifest["representation_readout"] == "final_layer_tokens"
+    assert manifest["average_top_k_layers"] == encoder.backbone.config["average_top_k_layers"]
+    assert manifest["hierarchy"] is True
+    assert manifest["duplicate_levels"] == []
     assert "frontend support" in manifest["padding"]
     a = np.load(output / "train/a.wav.embedding.npy", allow_pickle=False)
     b = np.load(output / "train/b.wav.embedding.npy", allow_pickle=False)
@@ -175,6 +230,32 @@ def test_export_preserves_variable_lengths_and_task_splits(encoder, tmp_path, em
         assert a.shape == b.shape == (16,)
     with pytest.raises(FileExistsError):
         export_task(HEARModel(encoder), task, output)
+
+
+@pytest.mark.parametrize("hierarchy", [False, True])
+@pytest.mark.parametrize("readout_mode", ["legacy", "normalized_top_k"])
+def test_export_records_window_readout_and_flat_duplicates(
+    make_config, tmp_path, hierarchy, readout_mode
+):
+    config = make_config(["experiment=upstream_smoke"])
+    config.model.hierarchy = hierarchy
+    config.model.readout_mode = readout_mode
+    encoder = hydra.utils.instantiate(config.model).eval()
+    output = export_task(HEARModel(encoder, "medium"), make_task(tmp_path), tmp_path / "export")
+    manifest = json.loads((output / "h-wavjepa-export.json").read_text())
+    assert manifest["readout_mode"] == manifest["representation_readout"] == readout_mode
+    assert manifest["hierarchy"] is hierarchy
+    assert manifest["duplicate_levels"] == ([] if hierarchy else ["low", "medium", "high"])
+    if not hierarchy:
+        inputs = audio(1024)
+        low = get_scene_embeddings(inputs, HEARModel(encoder, "low"))
+        for representation in ("medium", "high"):
+            torch.testing.assert_close(
+                get_scene_embeddings(inputs, HEARModel(encoder, representation)),
+                low,
+                rtol=0,
+                atol=0,
+            )
 
 
 def test_export_rejects_path_escape(encoder, tmp_path):

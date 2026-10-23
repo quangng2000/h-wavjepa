@@ -1,5 +1,9 @@
 # Third-party notices
 
+The root [MIT license](LICENSE) covers this project's original code. The notices
+below retain the licenses for imported and adapted portions; the root license
+does not relicense external datasets, pretrained weights, or dependencies.
+
 ## WavJEPA
 
 The actual core from [labhamlet/wavjepa](https://github.com/labhamlet/wavjepa),

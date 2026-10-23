@@ -93,6 +93,17 @@ def export_task(
         "protocol_version": PROTOCOL_VERSION,
         "module": "src.hear_api",
         "representation": model.representation,
+        "readout_mode": model.encoder.readout_mode,
+        "representation_readout": (
+            "final_layer_tokens"
+            if model.representation == "backbone"
+            else model.encoder.readout_mode
+        ),
+        "average_top_k_layers": model.encoder.backbone.config["average_top_k_layers"],
+        "hierarchy": model.encoder.config["hierarchy"],
+        "duplicate_levels": (
+            [] if model.encoder.config["hierarchy"] else ["low", "medium", "high"]
+        ),
         "sample_rate": model.sample_rate,
         "window_samples": model.encoder.window_samples,
         "window_batch_size": model.window_batch_size,

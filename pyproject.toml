@@ -2,6 +2,8 @@
 name = "h-wavjepa"
 version = "0.1.0"
 description = "Three-level waveform JEPA training and representation extraction"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/licenses/*", "src/vendor/wavjepa/LICENSE*"]
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "torch>=2.6,<3",

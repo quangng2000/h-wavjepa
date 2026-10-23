@@ -95,7 +95,9 @@ def _window_readouts(audio: Tensor, model: HEARModel, starts: list[int]) -> Tens
             if model.representation == "backbone":
                 values = model.encoder.backbone.encode_tokens(windows[:, None])[:, 0]
             else:
-                low = model.encoder.backbone.encode_windows(windows[:, None])
+                low = model.encoder.backbone.encode_windows(
+                    windows[:, None], readout_mode=model.encoder.readout_mode
+                )
                 levels = model.encoder._levels(low, model.encoder.abstractions)
                 values = levels[REPRESENTATIONS.index(model.representation)][:, 0]
             batches.append(values.float().cpu())
