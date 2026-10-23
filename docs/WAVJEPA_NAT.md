@@ -244,8 +244,17 @@ assembly command itself performs **no uploads, downloads, or remote checks**;
 its manifest says `remote_verified=false` and its plan reports
 `offline_verified_not_uploaded`. This output can instantiate the renderer's
 remote-metadata path, but cannot prove that S3 contains the files or that a GPU
-run can read them. A remote readback and the Nat-specific hardware test remain
-required.
+run can read them. Production still needs full remote readback verification;
+a separate Nat hardware probe is the default unless explicitly waived.
+
+`python -m src.stage_nat_assets` performs rolling preparation on a CPU host:
+one pinned source download, publisher-digest verification, conversion, then
+content-addressed uploads with full SHA-256 readback. It retains remote component
+receipts before removing local payloads. It publishes `ready.json` only when all
+70,000 training scenes and 20,000 training-noise files are verified. CPU scratch
+and runtime limits keep partial work resumable rather than silently labeling it
+complete. `Dockerfile.nat-staging` uses NumPy, SciPy, SoundFile and boto3 without
+Torch or CUDA.
 
 ## Configurations, weights and hardware verification
 
@@ -305,10 +314,13 @@ CNNs, full AudioSet validation apart from the global-batch tail, and durable
 checkpoint recovery. This validates held-out audio clips rendered with training
 rooms; it is not held-out-house or NatHEAR evaluation.
 
-The production segment runner currently rejects Nat reports until a Nat launch
-contract and budget have been established from measured hardware results.
+The production segment runner supports Nat with a hash-pinned completed asset
+manifest. It normally requires the matching Nat probe report. An explicitly
+authorized `--skip-streaming-acceptance` launch records the user's reason and
+`hardware_acceptance_passed=false`. This preserves the distinction between
+starting production and having measured Nat hardware acceptance.
 
-## Gates before renting production GPUs
+## Production readiness
 
 1. Stage verified training BRIRs and noise with an immutable manifest, hashes,
    sample rates, scene identities, split labels, and license provenance. Use
@@ -326,7 +338,56 @@ contract and budget have been established from measured hardware results.
    second, validation, and checkpoint transfer time. Recompute the bounded
    segment budget from this Nat measurement before production training.
 
-A small asset subset can validate implementation, but cannot establish complete
-70,000-scene preparation or full-corpus throughput. Until these gates pass, the
-production status is **Nat code implemented; assets and GPU acceptance
-pending**.
+A small asset subset cannot establish complete 70,000-scene preparation or
+full-corpus throughput. On October 23, 2026, the user explicitly chose to skip
+the separate GPU test and start bounded production after full asset staging.
+The CPU staging job and dependent four-H100 segment use separate credentials;
+GPU placement waits for the CPU job's verified completion result. The first
+segment retains real optimizer updates and durable checkpoints. The waiver
+does not establish a Nat speed or full-training cost estimate, and the clean
+mono benchmark cannot supply either number. See [bounded segments](TRAINING_SEGMENTS.md).
+
+## Rolling CPU staging
+
+`src.stage_nat_assets` downloads one pinned source archive at a time, checks its
+publisher digest, and reuses the offline converter above. WHAM's published MD5
+must pass before its SHA-256 is established. Every converted content-addressed
+object is uploaded with a conditional PUT and then streamed back in full to
+check its SHA-256. The S3 client limits all requests, including retries, to eight
+per second. This requires a storage endpoint that supports `If-None-Match: *`.
+
+```bash
+python -m src.stage_nat_assets \
+  --output-dir /data/nat-staging \
+  --endpoint "$S3_ENDPOINT" --bucket h-wavjepa-audioset \
+  --prefix nat-assets/20261023-v1 \
+  --max-runtime-seconds 42600 --max-scratch-bytes 107374182400 \
+  --max-upload-bytes 206158430208 --workers 4 --requests-per-second 8 \
+  --result-path /output/nat-staging-success.json
+```
+
+Provide bucket-scoped credentials through the standard AWS environment. The
+command does not create compute, set a billing cap, or restart a job. A provider
+runtime cap and spending authorization must surround it. Its internal limit is
+checked during download, conversion, upload and verification; individual network
+requests additionally have 10-second connection and 30-second read limits.
+Publisher downloads retry transient transport/server failures at most twice;
+S3 throttling/server responses have at most five retries. Failed source downloads
+restart their partial file; completed source archives are rehashed and reused.
+
+The local SQLite ledger retains verified object receipts. Each completed source
+also publishes `components/<source-id>.json` and `receipts/<source-id>.json` under
+the prefix before its scratch files are removed. A replacement CPU job can
+reconstruct its ledger from those remote receipts without redownloading completed
+archives: it checks each object's current size and ETag, and repeats full SHA
+readback if the ETag changed. The converter's output checks and the final
+assembler's pinned-source, split, reference and full-count checks still apply.
+
+Only all 70 verified source shards, 70,000 scenes and 20,000 training noise files
+permit publication of the immutable `manifest.json` and `ready.json`. The ready
+receipt includes the manifest key, size and SHA-256, raw inventory-file SHA-256,
+pinned BRIR repository/revision, counts, and `ready_for_training=true`. It is
+written to both the explicit result path and `GMN_RESULT_PATH` after its own
+remote readback passes. Partial or failed runs cannot release a dependent GPU
+job. These commands and fixture tests establish a staging implementation; they
+do not establish that the real assets have already been uploaded.

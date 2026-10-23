@@ -1,10 +1,9 @@
 # Bounded training segments
 
-This runner currently supports the clean mono pointwise and temporal models.
-It deliberately rejects Nat reports: the [Nat route](WAVJEPA_NAT.md) needs its
-own completed asset manifest, passing hardware probe, measured cost, and launch
-contract before bounded production training. The clean mono acceptance receipt
-cannot authorize a Nat run.
+This runner supports clean mono pointwise and temporal models, plus the
+binaural [Nat temporal model](WAVJEPA_NAT.md). Nat requires a completed, verified
+training-asset manifest with a pinned SHA-256. The clean mono acceptance receipt
+cannot stand in for a Nat hardware result.
 
 `scripts/train_segment.py` runs one four-H100 segment, saves full Lightning state
 to private S3, and exits. It does not rent GPUs, restart jobs, transfer credits, or
@@ -14,11 +13,18 @@ exhausted, and resume beyond that allocation after manual approval and top-up.
 Planned segments within the remaining approved allocation do not need fresh
 approval; each still needs a balance and spending-limit check before launch.
 
-Full training is still gated on the completed AudioSet index and a successful
+By default, training requires the completed AudioSet index and a successful
 four-GPU streaming probe using **one spawned data worker per rank**, the same
 model variant, and the exact completed index SHA256. The failed
 fork-worker probe and the successful local-audio timing run do not pass this gate.
 See [measured performance and remaining limitations](PERFORMANCE.md).
+
+An explicit user decision can waive the separate hardware probe with
+`--skip-streaming-acceptance --streaming-acceptance-waiver-reason '<reason>'`.
+The run records `waived_by_user` and `hardware_acceptance_passed=false`, never a
+passing test. This does not waive dataset checks, runtime validation, budget
+limits, or checkpoint verification. Nat throughput and total cost remain
+unmeasured until actual production results exist.
 
 ## Budget and launch bounds
 
@@ -127,13 +133,23 @@ before launching. The script discovers `latest.json`, downloads the entire
 checkpoint, verifies its SHA256, and resumes through `Trainer.fit(ckpt_path=...)`.
 A completed 375,000-step checkpoint is rejected as unnecessary work.
 
-Global optimizer batch remains **64** (16 per GPU), with the absolute
+Clean mono global optimizer batch remains **64** (16 per GPU). Nat uses **16
+recordings** (four per GPU), each with eight masked crops, for **128 masked
+crops** per update. Both retain the absolute
 **375,000-step** target, **100,000-step** LR warmup and existing **100,000-step**
 EMA ramp. Optimizer moments, scheduler progress, EMA counters and Trainer loops
 restore from the full checkpoint; only the official Lightning Timer's previous
 elapsed time is reset for the new segment. Mismatched saved counters or schedules
 are rejected. A segment must advance beyond its starting optimizer step before
 it can report success.
+
+For Nat, replace `--temporal` with `--nat` and supply
+`--naturalistic-manifest /inputs/nat-manifest.json` and
+`--naturalistic-manifest-sha256 '<SHA256>'`. The runner copies the exact manifest
+into its working directory and binds its hash and crop recipe to checkpoint
+ownership. Resuming with changed assets or switching between mono and Nat fails.
+`scripts/start_nat_segment.py` can fetch the completed staging receipt and its
+hash-verified manifest before invoking this runner; it does not rent GPUs.
 
 Data iterator and prefetch positions are **not restored**. This limitation needs
 the explicit acknowledgement flag. Each segment records the policy

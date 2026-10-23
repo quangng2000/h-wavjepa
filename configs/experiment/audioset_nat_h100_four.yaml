@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 # Four recordings per rank: global 16 recordings / 128 masked crops.
-# Capacity and streaming throughput MUST be tested before a production launch.
+# Capacity and throughput are unmeasured; any probe waiver must be explicit.
 tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, four-h100, unbenchmarked]
 data:
   batch_size: 4

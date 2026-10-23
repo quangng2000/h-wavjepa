@@ -5,6 +5,11 @@ behavior, not improved representation quality or reproduced benchmark scores.
 
 ## Nat integration, 23 October 2026
 
+The later production-launch changes add resumable CPU asset staging and a
+dependent Nat training bootstrap. The user explicitly waived the separate Nat
+GPU probe. This is an operational choice, not new hardware-validation evidence;
+launch receipts record `hardware_acceptance_passed=false`.
+
 The final local CPU suite reports **1,005 passed, 4 skipped** in 135.21 seconds.
 Two skips require BF16 CUDA DDP, one requires CUDA clustering kernels, and one
 requires the preparation host's FFmpeg. Ruff lint and formatting (139 files),

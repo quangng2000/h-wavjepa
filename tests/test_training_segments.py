@@ -26,11 +26,15 @@ from scripts.segment_checkpoint import (
 )
 from scripts.train_segment import (
     SegmentBudget,
+    execute_segment,
+    freeze_naturalistic_manifest,
     main,
     make_config,
     remember_descendants,
     stop_process_tree,
+    streaming_acceptance,
     supervise,
+    validate_launch_options,
     verify_resume_state,
     verify_streaming_report,
 )
@@ -770,7 +774,7 @@ def test_hard_watchdog_covers_child_setup_before_torchrun(monkeypatch):
     assert len(children) == 1 and children[0].poll() is not None
 
 
-def test_segment_runner_explicitly_rejects_nat_before_a_production_plan(tmp_path):
+def test_segment_runner_requires_explicit_nat_production_selection(tmp_path):
     report = streaming_report(temporal=True)
     report["model_variant"] = "nat_temporal_aggregation"
     report["architecture"].update(
@@ -778,7 +782,7 @@ def test_segment_runner_explicitly_rejects_nat_before_a_production_plan(tmp_path
     )
     path = tmp_path / "nat-streaming.json"
     path.write_text(json.dumps(report))
-    with pytest.raises(ValueError, match="mono-only"):
+    with pytest.raises(ValueError, match="explicit --nat"):
         verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=True)
 
 
@@ -804,3 +808,292 @@ def test_production_gate_preserves_clean_pre_nat_mono_receipts(tmp_path, tempora
     path.write_text(json.dumps(report))
     with pytest.raises(ValueError, match="streaming probe"):
         verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=temporal)
+
+
+def nat_launch_args(tmp_path, **overrides):
+    return SimpleNamespace(
+        **{
+            "nat": True,
+            "temporal": False,
+            "plan_only": False,
+            "naturalistic_manifest": tmp_path / "assets.json",
+            "naturalistic_manifest_sha256": "b" * 64,
+            "streaming_smoke_report": None,
+            "index_sha256": "a" * 64,
+            "skip_streaming_acceptance": True,
+            "streaming_acceptance_waiver_reason": "User explicitly requested Nat training without a separate GPU preflight.",
+            **overrides,
+        }
+    )
+
+
+def test_nat_waiver_records_user_reason_and_never_claims_hardware_acceptance(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "scripts.train_segment.verify_streaming_report",
+        lambda *args, **kwargs: pytest.fail("A waived report must not be fabricated or verified"),
+    )
+    result = streaming_acceptance(nat_launch_args(tmp_path))
+    assert result["status"] == "waived_by_user"
+    assert result["hardware_acceptance_passed"] is False
+    assert result["report_sha256"] is None
+    assert "User explicitly requested" in result["reason"]
+    assert "checkpoint integrity remain enabled" in result["scope"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"streaming_acceptance_waiver_reason": None},
+        {"streaming_acceptance_waiver_reason": "   "},
+        {"skip_streaming_acceptance": False},
+        {"streaming_smoke_report": Path("old-mono-report.json")},
+        {"naturalistic_manifest": None},
+        {"naturalistic_manifest_sha256": "not-a-sha"},
+        {"nat": False},
+    ],
+)
+def test_nat_waiver_cannot_silently_bypass_launch_identity(tmp_path, changes):
+    with pytest.raises(ValueError):
+        validate_launch_options(nat_launch_args(tmp_path, **changes))
+
+
+def test_hardware_report_remains_required_without_explicit_waiver(tmp_path):
+    with pytest.raises(ValueError, match="successful streaming hardware report"):
+        streaming_acceptance(
+            nat_launch_args(
+                tmp_path, skip_streaming_acceptance=False, streaming_acceptance_waiver_reason=None
+            )
+        )
+
+
+def test_nat_production_config_preserves_crops_batch_schedule_and_safety_guards(tmp_path):
+    from src.utils.runtime import file_sha256
+
+    segment = plan(tmp_path) | {"nat": True, "global_batch": 16}
+    work = Path(segment["work_dir"])
+    work.mkdir()
+    manifest = work / "frozen-naturalistic-manifest.json"
+    manifest.write_text('{"pinned": "manifest fixture"}')
+    segment["naturalistic_manifest_sha256"] = file_sha256(manifest)
+    cfg = make_config(segment)
+    validate_config(cfg)
+    assert cfg.trainer.devices == cfg.data.batch_size == 4
+    assert cfg.model.backbone.config.input_channels == 2
+    assert cfg.model.backbone.config.use_gradient_checkpointing is True
+    assert cfg.model.backbone.config.compact_masked_tokens is True
+    assert cfg.data.masked_crops_per_recording == cfg.model.masked_crops_per_recording == 8
+    assert cfg.data.masked_crop_samples == cfg.model.masked_crop_samples == 32160
+    assert cfg.data.batch_size * cfg.trainer.devices * cfg.data.masked_crops_per_recording == 128
+    assert cfg.data.naturalistic_manifest == str(manifest)
+    assert cfg.model.lr_total_steps == cfg.trainer.max_steps == 375000
+    assert cfg.model.lr_warmup_steps == cfg.model.ema_anneal_end_step == 100000
+    assert cfg.model.masked_weight == 1 and cfg.model.temporal_variance_weight == 0.1
+    assert cfg.data.allow_partial_index is False and cfg.trainer.limit_val_batches == 1.0
+    assert instantiate(cfg.trainer.strategy)._timeout == timedelta(seconds=720)
+    assert cfg.callbacks.model_checkpoint.transfer_timeout_seconds == 600
+    manifest.write_text('{"changed": true}')
+    with pytest.raises(ValueError, match="manifest changed"):
+        make_config(segment)
+
+
+def test_nat_manifest_is_frozen_with_exact_sha_remote_scope_and_training_split(tmp_path):
+    from test_naturalistic_audio import _assets, _remote_assets
+
+    from src.utils.runtime import file_sha256
+
+    source, manifest = _assets(tmp_path)
+    _remote_assets(source, manifest)
+    digest = file_sha256(source)
+    destination = tmp_path / "frozen.json"
+    assert (
+        freeze_naturalistic_manifest(
+            source, destination, digest, bucket=manifest["bucket"], endpoint=manifest["endpoint"]
+        )
+        == digest
+    )
+    assert destination.read_bytes() == source.read_bytes()
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        freeze_naturalistic_manifest(
+            source, destination, "c" * 64, bucket=manifest["bucket"], endpoint=manifest["endpoint"]
+        )
+    with pytest.raises(ValueError, match="same private bucket"):
+        freeze_naturalistic_manifest(
+            source, destination, digest, bucket="unrelated-bucket", endpoint=manifest["endpoint"]
+        )
+    manifest["split"] = "test"
+    source.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="training assets"):
+        freeze_naturalistic_manifest(
+            source,
+            destination,
+            file_sha256(source),
+            bucket=manifest["bucket"],
+            endpoint=manifest["endpoint"],
+        )
+
+
+def test_nat_checkpoint_owner_binds_asset_manifest_and_crop_population(tmp_path):
+    client = CheckpointS3()
+    repo = repository(client, global_batch=16, naturalistic_manifest_sha256="b" * 64)
+    repo.open(initialize=True)
+    saved = repo.publish(payload(tmp_path, 2), 2, segment_id="nat-segment-001", data_seed=42)
+    assert saved["owner"]["naturalistic_manifest_sha256"] == "b" * 64
+    assert saved["owner"]["global_batch"] == 16
+    assert saved["owner"]["input_channels"] == 2
+    assert saved["owner"]["masked_crops_per_recording"] == 8
+    assert saved["owner"]["masked_crop_samples"] == 32160
+    for changes in (
+        {"global_batch": 16, "naturalistic_manifest_sha256": "c" * 64},
+        {"global_batch": 16},
+        {},
+    ):
+        with pytest.raises(ValueError, match="different run"):
+            repository(client, **changes).open(initialize=False)
+    with pytest.raises(ValueError, match="global batch 16"):
+        repository(client, naturalistic_manifest_sha256="b" * 64)
+
+
+def test_waiver_preserves_completed_corpus_gate_before_checkpoint_or_training(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "partial-index.json"
+    source.write_text("{}")
+    args = nat_launch_args(
+        tmp_path,
+        segment_hours=2,
+        budget_usd=40,
+        maximum_rate_usd_per_hour=15.12,
+        finalization_reserve_seconds=1800,
+        transfer_timeout_seconds=600,
+        exclusive_checkpoint_writer=True,
+        acknowledge_stream_restart=True,
+        execute_started=time.time(),
+        output=tmp_path / "output",
+        work_dir=tmp_path / "work",
+        index=source,
+        data_endpoint="https://storage.givemeanode.com",
+    )
+    monkeypatch.setattr(
+        "scripts.train_segment.checkpoint_client",
+        lambda *args: pytest.fail(
+            "An invalid corpus must fail before accessing the checkpoint bucket"
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.train_segment.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("An invalid corpus must never start training"),
+    )
+    with pytest.raises(ValueError, match="Frozen staging index size/SHA256 mismatch"):
+        execute_segment(args)
+
+
+def test_nat_resume_rejects_changed_manifest_crop_recipe_and_mono_selection(tmp_path):
+    from test_hierarchical_dynamics import model_factory
+    from test_nat_backbone import nat_config
+
+    from src.models.components.wavjepa_backbone import WavJEPABackbone
+
+    model = model_factory(
+        backbone=WavJEPABackbone(nat_config()),
+        masked_crops_per_recording=8,
+        masked_crop_samples=32160,
+        aggregation_windows=[1, 2, 2],
+        temporal_variance_weight=0.1,
+        lr_schedule="cosine",
+        lr_total_steps=375000,
+        lr_warmup_steps=100000,
+        ema_anneal_end_step=100000,
+        ema_end_decay=0.99999,
+    )
+    state = {
+        "global_step": 2,
+        "state_dict": {"ema_updates": torch.tensor(2)},
+        "optimizer_states": [{"state": {0: {"step": torch.tensor(2)}}}],
+        "lr_schedulers": [{"last_epoch": 2}],
+        "loops": {"fit_loop": {}},
+        "ShardedAudioDataModule": {
+            "index_sha256": "a" * 64,
+            "naturalistic_sha256": "b" * 64,
+            "masked_crops_per_recording": 8,
+            "masked_crop_samples": 32160,
+        },
+        model.CHECKPOINT_KEY: model.checkpoint_metadata(),
+        model.SCHEDULE_CHECKPOINT_KEY: {
+            "total_steps": 375000,
+            "warmup_steps": 100000,
+            "ema_end_step": 100000,
+        },
+    }
+    receipt = {
+        "checkpoint": {"step": 2},
+        "owner": {"global_batch": 16, "naturalistic_manifest_sha256": "b" * 64},
+    }
+    path = tmp_path / "nat-resume.ckpt"
+    torch.save(state, path)
+    assert (
+        verify_resume_state(
+            path, receipt, "a" * 64, nat=True, naturalistic_manifest_sha256="b" * 64
+        )
+        == 2
+    )
+    for changes in ({}, {"nat": True, "naturalistic_manifest_sha256": "c" * 64}):
+        with pytest.raises(ValueError, match="channel/crop/manifest"):
+            verify_resume_state(path, receipt, "a" * 64, **changes)
+    state["ShardedAudioDataModule"]["masked_crops_per_recording"] = 1
+    torch.save(state, path)
+    with pytest.raises(ValueError, match="channel/crop/manifest"):
+        verify_resume_state(
+            path, receipt, "a" * 64, nat=True, naturalistic_manifest_sha256="b" * 64
+        )
+
+
+def test_strict_nat_acceptance_still_requires_matching_remote_assets_and_both_ears(tmp_path):
+    report = streaming_report(temporal=True)
+    report["model_variant"] = "nat_temporal_aggregation"
+    report["architecture"].update(
+        input_channels=2, masked_crops_per_recording=8, masked_crop_samples=32160
+    )
+    report["frozen_index"]["naturalistic_manifest_sha256"] = "b" * 64
+    report["checkpoint"]["durable_s3"]["receipt"]["owner"]["global_batch"] = 16
+    for rank in report["ranks"]:
+        rank.update(
+            global_batch=16,
+            global_masked_crops=128,
+            naturalistic_manifest_sha256="b" * 64,
+            nat_asset_streaming={
+                "manifest_sha256": "b" * 64,
+                "train_end": {
+                    "remote_cache_contracts": 1,
+                    "brir": {"verified_files": 2, "verified_bytes": 100},
+                    "noise": {"verified_files": 2, "verified_bytes": 100},
+                },
+                "new_verified_brir_objects_after_warmup": 1,
+                "new_verified_noise_objects_after_warmup": 1,
+            },
+            ear_cnn_updates=[
+                {
+                    "ear": ear,
+                    "independent_parameters": True,
+                    "parameter_tensors": 1,
+                    "changed_parameter_tensors": 1,
+                    "all_parameters_finite": True,
+                }
+                for ear in (0, 1)
+            ],
+        )
+    for row in report["validation"]:
+        row["naturalistic_manifest_sha256"] = "b" * 64
+    path = tmp_path / "nat-passed.json"
+    path.write_text(json.dumps(report))
+    args = nat_launch_args(
+        tmp_path,
+        skip_streaming_acceptance=False,
+        streaming_acceptance_waiver_reason=None,
+        streaming_smoke_report=path,
+    )
+    result = streaming_acceptance(args)
+    assert result["hardware_acceptance_passed"] is True and result["status"] == "passed"
+    report["ranks"][2]["ear_cnn_updates"][1]["changed_parameter_tensors"] = 0
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="both independent ear CNNs"):
+        streaming_acceptance(args)

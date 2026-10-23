@@ -5,7 +5,8 @@ submit the printed platform limit with max_restarts=0. This process cannot read
 account balances using bucket credentials. --plan-only does no network I/O.
 
 Use a frozen, completed staging index and a successful streaming GPU report for
-the spawn-worker path. Resume restores full Lightning state but restarts data
+the spawn-worker path, unless the user explicitly waives that separate preflight.
+A waiver records its reason and never disables training validation or checkpoint integrity. Resume restores full Lightning state but restarts data
 iterators; --acknowledge-stream-restart makes this limitation explicit.
 The data seed is base_data_seed + resumed optimizer step; the model seed and
 LR/EMA schedules stay fixed. This changes restart order, not sample-exact resume.
@@ -94,32 +95,45 @@ class SegmentBudget:
         }
 
 
-def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal: bool = False):
+def verify_streaming_report(
+    path: Path,
+    *,
+    expected_index_sha256: str,
+    temporal: bool = False,
+    nat: bool = False,
+    naturalistic_manifest_sha256: str | None = None,
+):
     """Bind production to the tested model, completed corpus and durable handoff."""
-    from scripts.benchmark_streaming_gpu import require_architecture, temporal_loss_metrics
+    from scripts.benchmark_streaming_gpu import (
+        _require_nat_training_evidence,
+        require_architecture,
+        temporal_loss_metrics,
+    )
 
     report = json.loads(path.read_text())
-    if (
+    temporal = temporal or nat
+    global_batch = 16 if nat else 64
+    variant = (
+        "nat_temporal_aggregation" if nat else ("temporal_aggregation" if temporal else "pointwise")
+    )
+    if not nat and (
         report.get("model_variant") == "nat_temporal_aggregation"
         or report.get("architecture", {}).get("input_channels", 1) != 1
         or report.get("architecture", {}).get("masked_crops_per_recording", 0) != 0
     ):
-        raise ValueError(
-            "The production segment runner is mono-only; Nat requires its own accepted "
-            "hardware report and production budget plan"
-        )
+        raise ValueError("A Nat hardware report requires an explicit --nat production plan")
     ranks, validation = report.get("ranks", []), report.get("validation", [])
     frozen, checkpoint = report.get("frozen_index", {}), report.get("checkpoint", {})
     durable = checkpoint.get("durable_s3", {})
     receipt = durable.get("receipt", {})
     try:
         validation_clips = frozen["split_counts"]["val"]
-        used_clips = validation_clips // 64 * 64
+        used_clips = validation_clips // global_batch * global_batch
         steps = ranks[0]["optimizer_steps"]
         if (
             not SHA.fullmatch(expected_index_sha256)
             or report.get("ok") is not True
-            or report.get("model_variant") != ("temporal_aggregation" if temporal else "pointwise")
+            or report.get("model_variant") != variant
             or report.get("data_worker_start_method") != "spawn"
             or report.get("workers_per_rank") != 1
             or report.get("cache_refills_observed_on_all_ranks") is not True
@@ -147,25 +161,38 @@ def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal:
                 )
             )
             or receipt.get("owner", {}).get("index_sha256") != expected_index_sha256
+            or (nat and receipt.get("owner", {}).get("global_batch") != global_batch)
+            or (
+                nat
+                and (
+                    not isinstance(naturalistic_manifest_sha256, str)
+                    or not SHA.fullmatch(naturalistic_manifest_sha256)
+                    or frozen.get("naturalistic_manifest_sha256") != naturalistic_manifest_sha256
+                )
+            )
             or receipt.get("checkpoint", {}).get("step") != steps
             or receipt.get("checkpoint", {}).get("bytes") != checkpoint["bytes"]
         ):
             raise ValueError("Incomplete or mismatched streaming acceptance evidence")
         for item in (report, checkpoint, durable):
-            require_architecture(item.get("architecture", {}), temporal=temporal)
+            require_architecture(item.get("architecture", {}), temporal=temporal, nat=nat)
         for rank, (train, val) in enumerate(zip(ranks, validation, strict=True)):
             for row in (train, val):
-                require_architecture(row.get("architecture", {}), temporal=temporal)
+                require_architecture(row.get("architecture", {}), temporal=temporal, nat=nat)
                 if (
                     row.get("rank") != rank
                     or row.get("world_size") != 4
                     or row.get("optimizer_steps") != steps
                     or row.get("ema_updates") != steps
                     or row.get("frozen_index_sha256") != expected_index_sha256
+                    or (
+                        nat
+                        and row.get("naturalistic_manifest_sha256") != naturalistic_manifest_sha256
+                    )
                 ):
                     raise ValueError("Rank topology, progress or frozen corpus mismatch")
             if (
-                train.get("global_batch") != 64
+                train.get("global_batch") != global_batch
                 or train.get("data_worker_start_method") != "spawn"
                 or train.get("workers_per_rank") != 1
                 or train.get("online_weights_changed") is not True
@@ -180,6 +207,10 @@ def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal:
                 or any(not math.isfinite(value) for value in val["metrics"].values())
             ):
                 raise ValueError("Rank lacks finite updates, cache refill or full validation")
+            if nat:
+                if train.get("global_masked_crops") != 128:
+                    raise ValueError("Nat report does not prove 128 independent masked crops")
+                _require_nat_training_evidence(train, naturalistic_manifest_sha256)
             if temporal:
                 samples = train.get("temporal_training_samples", [])
                 if not samples or samples[0].get("optimizer_step") != 1:
@@ -199,6 +230,80 @@ def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal:
     return file_sha256(path)
 
 
+def validate_launch_options(args):
+    nat = getattr(args, "nat", False)
+    manifest = getattr(args, "naturalistic_manifest", None)
+    digest = getattr(args, "naturalistic_manifest_sha256", None)
+    if (
+        nat
+        and not getattr(args, "plan_only", False)
+        and (manifest is None or not isinstance(digest, str) or not SHA.fullmatch(digest))
+    ):
+        raise ValueError("Nat requires --naturalistic-manifest and its pinned SHA256")
+    if not nat and (manifest is not None or digest is not None):
+        raise ValueError("Naturalistic manifest arguments require --nat")
+    waived = getattr(args, "skip_streaming_acceptance", False)
+    reason = getattr(args, "streaming_acceptance_waiver_reason", None)
+    if waived and (not isinstance(reason, str) or len(reason.strip()) < 12):
+        raise ValueError("Skipping streaming acceptance requires a human-readable waiver reason")
+    if not waived and reason is not None:
+        raise ValueError("A waiver reason requires --skip-streaming-acceptance")
+    if waived and getattr(args, "streaming_smoke_report", None) is not None:
+        raise ValueError("Choose a verified streaming report or an explicit waiver, not both")
+
+
+def streaming_acceptance(args):
+    validate_launch_options(args)
+    if getattr(args, "skip_streaming_acceptance", False):
+        return {
+            "status": "waived_by_user",
+            "hardware_acceptance_passed": False,
+            "report_sha256": None,
+            "reason": args.streaming_acceptance_waiver_reason.strip(),
+            "scope": "separate streaming GPU preflight only; runtime validation and checkpoint integrity remain enabled",
+        }
+    if not args.streaming_smoke_report:
+        raise ValueError("A successful streaming hardware report is required before launch")
+    digest = verify_streaming_report(
+        args.streaming_smoke_report,
+        expected_index_sha256=args.index_sha256,
+        temporal=args.temporal,
+        nat=args.nat,
+        naturalistic_manifest_sha256=args.naturalistic_manifest_sha256,
+    )
+    return {"status": "passed", "hardware_acceptance_passed": True, "report_sha256": digest}
+
+
+def freeze_naturalistic_manifest(
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    *,
+    bucket: str,
+    endpoint: str,
+):
+    from src.data.naturalistic_audio import NaturalisticAudio
+
+    if not isinstance(expected_sha256, str) or not SHA.fullmatch(expected_sha256):
+        raise ValueError("A pinned naturalistic manifest SHA256 is required")
+    with source.open("rb") as handle:
+        payload = handle.read(256 * 1024**2 + 1)
+    if len(payload) > 256 * 1024**2 or hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ValueError("Naturalistic manifest size/SHA256 mismatch")
+    destination.write_bytes(payload)
+    renderer = NaturalisticAudio(destination, require_asset_checksums=True, cache_max_gib=1.0)
+    if (
+        not renderer.remote_assets
+        or renderer.split != "train"
+        or renderer.bucket != bucket
+        or renderer.endpoint != endpoint
+    ):
+        raise ValueError(
+            "Nat requires training assets in the same private bucket/endpoint as AudioSet"
+        )
+    return expected_sha256
+
+
 def freeze_complete_index(source: Path, destination: Path, expected_sha256: str, endpoint: str):
     from src.data.sharded_audio_datamodule import _validate_index
 
@@ -214,7 +319,14 @@ def freeze_complete_index(source: Path, destination: Path, expected_sha256: str,
     return expected_sha256
 
 
-def verify_resume_state(path: Path, receipt: dict, index_sha256: str):
+def verify_resume_state(
+    path: Path,
+    receipt: dict,
+    index_sha256: str,
+    *,
+    nat: bool = False,
+    naturalistic_manifest_sha256: str | None = None,
+):
     import torch
 
     state = torch.load(path, map_location="cpu", weights_only=True)
@@ -239,6 +351,26 @@ def verify_resume_state(path: Path, receipt: dict, index_sha256: str):
 
     metadata = HierarchicalWavJEPAModule.validated_checkpoint_metadata(state)
     dynamics = metadata["dynamics"]
+    data_state = state.get("ShardedAudioDataModule", {})
+    if (
+        metadata["backbone"].get("input_channels", 1) != (2 if nat else 1)
+        or dynamics.get("masked_crops_per_recording", 0) != (8 if nat else 0)
+        or dynamics.get("masked_crop_samples") != (32160 if nat else None)
+        or data_state.get("naturalistic_sha256") != naturalistic_manifest_sha256
+        or (
+            nat
+            and (
+                not isinstance(naturalistic_manifest_sha256, str)
+                or not SHA.fullmatch(naturalistic_manifest_sha256)
+                or data_state.get("masked_crops_per_recording") != 8
+                or data_state.get("masked_crop_samples") != 32160
+                or receipt.get("owner", {}).get("naturalistic_manifest_sha256")
+                != naturalistic_manifest_sha256
+                or receipt.get("owner", {}).get("global_batch") != 16
+            )
+        )
+    ):
+        raise ValueError("Resume checkpoint has a different channel/crop/manifest recipe")
     if (
         dynamics["lr_total_steps"],
         dynamics["lr_warmup_steps"],
@@ -259,18 +391,19 @@ def make_config(plan: dict):
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
+    nat = plan.get("nat", False)
+    global_batch = 16 if nat else 64
+    experiment = (
+        "audioset_nat_h100_four"
+        if nat
+        else (
+            "audioset_temporal_h100_four" if plan.get("temporal", False) else "audioset_h100_four"
+        )
+    )
     with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
         cfg = compose(
             config_name="train",
-            overrides=[
-                "experiment="
-                + (
-                    "audioset_temporal_h100_four"
-                    if plan.get("temporal", False)
-                    else "audioset_h100_four"
-                ),
-                "data=sharded_audio",
-            ],
+            overrides=[f"experiment={experiment}", "data=sharded_audio"],
         )
     OmegaConf.set_struct(cfg, False)
     work, output = Path(plan["work_dir"]), Path(plan["output"])
@@ -310,6 +443,11 @@ def make_config(plan: dict):
     cfg.data.endpoint = plan["data_endpoint"]
     cfg.data.cache_dir = str(work / "shard-cache")
     cfg.data.cache_max_gib = 60
+    if nat:
+        manifest = work / "frozen-naturalistic-manifest.json"
+        if file_sha256(manifest) != plan["naturalistic_manifest_sha256"]:
+            raise ValueError("Frozen naturalistic manifest changed before training")
+        cfg.data.naturalistic_manifest = str(manifest)
     cfg.data.num_workers = 1
     cfg.data.allow_partial_index = False
     cfg.data.allow_stream_restart_on_resume = True
@@ -318,6 +456,7 @@ def make_config(plan: dict):
     cfg.trainer.max_epochs = -1
     cfg.trainer.max_steps = 375000
     cfg.trainer.num_sanity_val_steps = 0
+    cfg.trainer.limit_val_batches = 1.0
     cfg.trainer.enable_model_summary = False
     # Peers wait in a collective while rank zero verifies the durable upload.
     # Raise only segment runs' timeout, preserving any longer preset timeout.
@@ -331,10 +470,20 @@ def make_config(plan: dict):
     cfg.ckpt_path = plan["resume_path"]
     cfg.train, cfg.test = True, False
     if (
-        cfg.data.batch_size * cfg.trainer.devices != 64
+        cfg.data.batch_size * cfg.trainer.devices != global_batch
         or cfg.trainer.get("accumulate_grad_batches", 1) != 1
     ):
-        raise ValueError("Segment must preserve the global optimizer batch of 64")
+        raise ValueError(f"Segment must preserve its global optimizer batch of {global_batch}")
+    if nat and (
+        cfg.data.masked_crops_per_recording != 8
+        or cfg.data.masked_crop_samples != 32160
+        or cfg.model.masked_crops_per_recording != 8
+        or cfg.model.masked_crop_samples != 32160
+        or cfg.model.backbone.config.input_channels != 2
+    ):
+        raise ValueError(
+            "Nat segment must retain binaural input and eight 2.01-second masked crops"
+        )
     if (cfg.model.lr_total_steps, cfg.model.lr_warmup_steps, cfg.model.ema_anneal_end_step) != (
         375000,
         100000,
@@ -370,7 +519,10 @@ def worker(plan_path: Path):
                 "initial_optimizer_step": plan["resume_step"],
                 "final_optimizer_step": step,
                 "ema_updates": int(model.ema_updates),
-                "global_batch": 64,
+                "global_batch": plan["global_batch"],
+                "global_masked_crops": 128 if plan["nat"] else 0,
+                "naturalistic_manifest_sha256": plan["naturalistic_manifest_sha256"],
+                "streaming_acceptance": plan["streaming_acceptance"],
                 "model_variant": plan["model_variant"],
                 "final_metrics": {
                     key: float(value)
@@ -508,13 +660,9 @@ def execute_segment(args):
         raise ValueError(
             "Explicit exclusive-writer and stream-restart acknowledgements are required"
         )
-    if not args.streaming_smoke_report:
-        raise ValueError("A successful streaming hardware report is required before launch")
-    smoke_sha = verify_streaming_report(
-        args.streaming_smoke_report,
-        expected_index_sha256=args.index_sha256,
-        temporal=args.temporal,
-    )
+    acceptance = streaming_acceptance(args)
+    nat, temporal = args.nat, args.temporal or args.nat
+    global_batch = 16 if nat else 64
     started = args.execute_started
     hard_deadline = started + budget.seconds
     training_deadline = hard_deadline - budget.finalization_reserve_seconds
@@ -524,16 +672,29 @@ def execute_segment(args):
             raise TimeoutError("Segment setup exhausted its training allowance")
 
     args.output.mkdir(parents=True, exist_ok=False)
+    atomic_json(args.output / "streaming-acceptance.json", acceptance)
     args.work_dir.mkdir(parents=True, exist_ok=False)
     frozen_sha = freeze_complete_index(
         args.index, args.work_dir / "frozen-index.json", args.index_sha256, args.data_endpoint
     )
+    naturalistic_sha = None
+    if nat:
+        index = json.loads((args.work_dir / "frozen-index.json").read_text())
+        naturalistic_sha = freeze_naturalistic_manifest(
+            args.naturalistic_manifest,
+            args.work_dir / "frozen-naturalistic-manifest.json",
+            args.naturalistic_manifest_sha256,
+            bucket=index["bucket"],
+            endpoint=args.data_endpoint,
+        )
     repository_options = dict(
         bucket=args.checkpoint_bucket,
         prefix=args.checkpoint_prefix,
         run_id=args.run_id,
         index_sha256=frozen_sha,
         base_data_seed=args.base_data_seed,
+        global_batch=global_batch,
+        naturalistic_manifest_sha256=naturalistic_sha,
     )
     repository = CheckpointRepository(
         checkpoint_client(args.checkpoint_endpoint), **repository_options, check=check
@@ -543,21 +704,33 @@ def execute_segment(args):
     if args.resume:
         resume_path = args.work_dir / "resume.ckpt"
         receipt = repository.download_latest(resume_path)
-        resume_step = verify_resume_state(resume_path, receipt, frozen_sha)
+        resume_step = verify_resume_state(
+            resume_path,
+            receipt,
+            frozen_sha,
+            nat=nat,
+            naturalistic_manifest_sha256=naturalistic_sha,
+        )
         atomic_json(args.output / "resumed-checkpoint.json", receipt)
         if resume_step == 375000:
             raise ValueError("Training already completed 375000 steps; no new segment is needed")
     check()
     plan = {
         "segment_id": args.segment_id,
-        "temporal": args.temporal,
-        "model_variant": "temporal_aggregation" if args.temporal else "pointwise",
+        "nat": nat,
+        "temporal": temporal,
+        "global_batch": global_batch,
+        "naturalistic_manifest_sha256": naturalistic_sha,
+        "model_variant": "nat_temporal_aggregation"
+        if nat
+        else ("temporal_aggregation" if temporal else "pointwise"),
         "work_dir": str(args.work_dir.resolve()),
         "output": str(args.output.resolve()),
         "repository_options": repository_options | {"endpoint": args.checkpoint_endpoint},
         "data_endpoint": args.data_endpoint,
         "index_sha256": frozen_sha,
-        "streaming_smoke_report_sha256": smoke_sha,
+        "streaming_smoke_report_sha256": acceptance["report_sha256"],
+        "streaming_acceptance": acceptance,
         "training_deadline": training_deadline,
         "hard_deadline": hard_deadline,
         "budget": budget.report(),
@@ -625,6 +798,11 @@ def main(argv=None):
         action="store_true",
         help="Use the tested temporal aggregation model; omit for the pointwise baseline",
     )
+    parser.add_argument("--nat", action="store_true", help="Train the binaural Nat temporal model")
+    parser.add_argument("--naturalistic-manifest", type=Path)
+    parser.add_argument("--naturalistic-manifest-sha256")
+    parser.add_argument("--skip-streaming-acceptance", action="store_true")
+    parser.add_argument("--streaming-acceptance-waiver-reason")
     parser.add_argument("--segment-hours", type=float, default=10)
     parser.add_argument("--budget-usd", type=float)
     parser.add_argument("--maximum-rate-usd-per-hour", type=float)
@@ -666,6 +844,10 @@ def main(argv=None):
             "Missing required launch fields: "
             + ", ".join(field for field in required if getattr(args, field) is None)
         )
+    try:
+        validate_launch_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     if args.checkpoint_every_steps < 1:
         parser.error("checkpoint-every-steps must be positive")
     if args.execute_started is not None:

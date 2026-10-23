@@ -32,7 +32,7 @@ import time
 import wave
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 from urllib.parse import urlparse
 
 import numpy as np
@@ -544,10 +544,15 @@ def assemble_nat_manifest(
     brir_inventory: str | Path | None = None,
     max_seconds: float = 10800,
     max_total_object_bytes: int = 256 * 1024**3,
+    _remote_verifier: Callable[[str, str, int], None] | None = None,
 ) -> dict:
     """Verify local components and publish a remote manifest plus upload plan.
 
-    No remote operation occurs. Full-corpus mode additionally checks all source
+    By default no remote operation occurs. The rolling stager alone supplies
+    _remote_verifier: it must verify each key against a durable full-GET receipt
+    (including size and SHA-256) and recheck receipts from earlier runs remotely.
+    This route preserves all component/source/count validation but does not
+    require converted payloads to remain on disk. Full-corpus mode checks all source
     shard receipts against the pinned inventory and requires 70,000 BRIR scenes
     and 20,000 training noise files. Explicit pilot mode is marked in provenance
     and cannot establish complete-corpus readiness.
@@ -624,8 +629,12 @@ def assemble_nat_manifest(
         "assets": {},
         "provenance": {
             "coverage": "pilot" if allow_pilot else "full",
-            "remote_verified": False,
-            "assembly": "local object sizes and SHA-256 verified; not uploaded",
+            "remote_verified": _remote_verifier is not None,
+            "assembly": (
+                "all objects enrolled with full-GET SHA-256 receipts; prior-run receipts rechecked"
+                if _remote_verifier is not None
+                else "local object sizes and SHA-256 verified; not uploaded"
+            ),
             "brir_repository": BRIR_REPOSITORY,
             "brir_revision": BRIR_REVISION,
             "component_manifests": [],
@@ -757,7 +766,10 @@ def assemble_nat_manifest(
                 raise ValueError("Repeated object references have inconsistent metadata")
             if local_key not in local_keys:
                 physical = (path.parent / local_key).resolve()
-                if (
+                remote_key = f"{prefix}/{local_key}"
+                if _remote_verifier is not None:
+                    _remote_verifier(remote_key, digest, size)
+                elif (
                     not physical.is_relative_to(path.parent)
                     or not physical.is_file()
                     or physical.stat().st_size != size
@@ -767,13 +779,12 @@ def assemble_nat_manifest(
                         "Local converted object failed path, size or SHA-256 verification"
                     )
                 local_keys[local_key] = (size, digest)
-                remote_key = f"{prefix}/{local_key}"
                 if remote_key not in objects:
                     total_bytes += size
                     if total_bytes > max_total_object_bytes:
                         raise PreparationLimit("Assembly object byte bound reached")
                     objects[remote_key] = {
-                        "local_path": str(physical),
+                        "local_path": str(physical) if _remote_verifier is None else None,
                         "key": remote_key,
                         "bytes": size,
                         "sha256": digest,
@@ -799,7 +810,11 @@ def assemble_nat_manifest(
     size, digest = _write_immutable_json(output_path, combined)
     plan = {
         "schema_version": 1,
-        "status": "offline_verified_not_uploaded",
+        "status": (
+            "remote_objects_verified_manifest_not_published"
+            if _remote_verifier is not None
+            else "offline_verified_not_uploaded"
+        ),
         "bucket": bucket,
         "endpoint": endpoint.rstrip("/"),
         "prefix": prefix,
@@ -822,7 +837,11 @@ def assemble_nat_manifest(
         "scene_count": len(scene_ids),
         "noise_count": len(combined["noise_files"]),
         "object_bytes": total_bytes,
-        "status": "offline_verified_not_uploaded",
+        "status": (
+            "remote_objects_verified_manifest_not_published"
+            if _remote_verifier is not None
+            else "offline_verified_not_uploaded"
+        ),
     }
 
 

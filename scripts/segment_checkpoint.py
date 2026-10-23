@@ -94,6 +94,7 @@ class CheckpointRepository:
         check,
         base_data_seed: int = 42,
         global_batch: int = 64,
+        naturalistic_manifest_sha256: str | None = None,
     ):
         if not RUN_ID.fullmatch(run_id) or not SHA.fullmatch(index_sha256):
             raise ValueError("Expected a stable run ID and frozen index SHA256")
@@ -101,6 +102,14 @@ class CheckpointRepository:
             raise ValueError("Expected a nonnegative bounded base data seed")
         if type(global_batch) is not int or global_batch < 1:
             raise ValueError("Expected a positive integer global recording batch")
+        if naturalistic_manifest_sha256 is not None and (
+            not isinstance(naturalistic_manifest_sha256, str)
+            or not SHA.fullmatch(naturalistic_manifest_sha256)
+            or global_batch != 16
+        ):
+            raise ValueError(
+                "Nat checkpoint ownership requires a manifest SHA256 and global batch 16"
+            )
         parts = prefix.split("/")
         if (
             len(parts) < 2
@@ -124,6 +133,13 @@ class CheckpointRepository:
             "base_data_seed": base_data_seed,
             "data_seed_policy": "base_plus_resume_step",
         }
+        if naturalistic_manifest_sha256 is not None:
+            self.owner.update(
+                naturalistic_manifest_sha256=naturalistic_manifest_sha256,
+                input_channels=2,
+                masked_crops_per_recording=8,
+                masked_crop_samples=32160,
+            )
         self.owner_key, self.latest_key = f"{prefix}/owner.json", f"{prefix}/latest.json"
         self.object_pattern = re.compile(
             re.escape(prefix) + r"/checkpoints/step_[0-9]{7}_[a-f0-9]{64}\.ckpt"

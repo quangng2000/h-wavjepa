@@ -1,0 +1,12 @@
+# Official Python 3.12 slim Bookworm, linux/amd64 digest checked 2026-10-23.
+FROM python:3.12-slim-bookworm@sha256:57d96f71de145a98e7ceca18ee4ade77bba4103a33a72dfaea026b23625c6bf0
+WORKDIR /app
+COPY uv.lock ./
+# Use the same package pins as training, without installing Torch or CUDA.
+RUN python -c "import tomllib; packages=tomllib.load(open('uv.lock','rb'))['package']; open('/tmp/constraints.txt','w').write('\n'.join(p['name']+'=='+p['version']+(' ; '+' or '.join(p['resolution-markers']) if p.get('resolution-markers') else '') for p in packages if 'version' in p)+'\n')" \
+    && python -m pip install --no-cache-dir -c /tmp/constraints.txt numpy scipy soundfile boto3
+COPY src/ src/
+COPY configs/data/audioset-source-catalog.json configs/data/audioset-source-catalog.json
+COPY docs/validation/wavjepa-nat-assets-2026-10-23.json docs/validation/wavjepa-nat-assets-2026-10-23.json
+ENV PYTHONPATH=/app OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+CMD ["python", "-m", "src.stage_nat_assets", "--help"]

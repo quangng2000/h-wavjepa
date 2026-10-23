@@ -10,8 +10,9 @@ The model retains masked prediction and adds three future predictors. The **poin
 
 [H-WavJEPA-Nat](docs/WAVJEPA_NAT.md) adds the official independent binaural encoders,
 shared temporal masks, naturalistic room/noise rendering, and eight random
-2.01-second masked crops per recording. Its assets and four-H100 throughput must
-be validated before production; the clean mono benchmark does not qualify Nat.
+2.01-second masked crops per recording. Production requires verified Nat assets.
+Four-H100 Nat throughput remains unmeasured; an explicitly waived GPU preflight
+is recorded as such, and the clean mono benchmark does not qualify Nat.
 
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
