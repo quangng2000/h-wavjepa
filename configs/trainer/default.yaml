@@ -14,8 +14,9 @@ precision: 32-true
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: 1
 
-# set True to to ensure deterministic results
-# makes training slower but gives more reproducibility than just setting seeds
+# Conservative CPU/one-device default for repeatable debugging on the same stack.
+# Deterministic kernels can be slower; the H100 throughput preset overrides this.
+# This does not guarantee identical results across hardware or distributed layouts.
 deterministic: True
 
 gradient_clip_val: 1.0

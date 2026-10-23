@@ -17,6 +17,7 @@ from __future__ import annotations
 import array
 import hashlib
 import json
+import math
 import sys
 import wave
 from collections.abc import Iterator
@@ -370,6 +371,7 @@ class WAVManifestDataModule(L.LightningDataModule):
         train_random_crop: bool = False,
         train_drop_last: bool = False,
         seed: int = 0,
+        worker_timeout_seconds: float = 180,
     ) -> None:
         super().__init__()
         for name, value in (
@@ -379,6 +381,13 @@ class WAVManifestDataModule(L.LightningDataModule):
             ("minimum_batch_size", minimum_batch_size),
         ):
             _positive_integer(value, name)
+        if (
+            isinstance(worker_timeout_seconds, bool)
+            or not isinstance(worker_timeout_seconds, (int, float))
+            or not math.isfinite(worker_timeout_seconds)
+            or worker_timeout_seconds <= 0
+        ):
+            raise ValueError("worker_timeout_seconds must be a finite positive number")
         _positive_integer(num_workers, "num_workers", minimum=0)
         _positive_integer(seed, "seed", minimum=0)
         if batch_size < minimum_batch_size:
@@ -444,6 +453,7 @@ class WAVManifestDataModule(L.LightningDataModule):
             # CUDA/NCCL may already be initialized; inherited fork state is unsafe.
             # Epochs travel in sampler indices, so no cross-context shared locks are needed.
             options["multiprocessing_context"] = "spawn"
+            options["timeout"] = self.hparams.worker_timeout_seconds
         world_size = self.trainer.world_size if self.trainer is not None else 1
         rank = self.trainer.global_rank if self.trainer is not None else 0
         drop_last = shuffle and self.hparams.train_drop_last

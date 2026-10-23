@@ -1,6 +1,7 @@
 """CPU checks for the GPU probe's real config, lifecycle and success evidence."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import lightning as L
@@ -159,3 +160,18 @@ def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_pa
         summarize(tmp_path, 2, 400, frozen)
     with pytest.raises(RuntimeError, match="nonfinite"):
         finite_metrics([{"val/loss": float("nan")}])
+
+
+def test_scratch_is_unique_and_outside_artifact_tree_even_if_cleanup_never_runs(tmp_path):
+    from scripts.benchmark_streaming_gpu import scratch_directory
+
+    output = tmp_path / "reports"
+    first = scratch_directory(tmp_path / "scratch", output)
+    second = scratch_directory(tmp_path / "scratch", output)
+    assert first != second
+    assert first.is_dir() and second.is_dir()
+    (first / "large-cache.tar").write_bytes(b"partial shard")
+    assert not output.exists()
+    for forbidden in (output, output / "nested", Path("/output/cache")):
+        with pytest.raises(ValueError, match="outside /output"):
+            scratch_directory(forbidden, output)

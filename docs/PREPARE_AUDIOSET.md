@@ -74,9 +74,10 @@ Full preparation transfers about 2.46 TB of source FLAC archives. A 250 GiB node
 disk cannot hold the complete prepared corpus. For a smaller CPU host, use the
 [rolling object-storage stager](STAGE_AUDIOSET.md), which uploads and verifies
 one source at a time before removing its local WAVs. The command above retains
-all WAVs locally. The training loader still requires local WAVs; object-storage
-staging does not add streaming training. Do not interpret a successful pilot as
-a completed dataset.
+all WAVs locally. Use `WAVManifestDataModule` for those local WAVs, or the
+[verified sharded loader](SHARDED_AUDIO.md) to train directly from the staged
+private-S3 TARs with bounded local caching. A successful staging pilot is neither
+a completed dataset nor a passing GPU throughput test.
 
 ## Resume, reports and training preflight
 

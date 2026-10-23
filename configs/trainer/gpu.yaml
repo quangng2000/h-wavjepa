@@ -3,3 +3,5 @@ defaults:
 
 accelerator: gpu
 devices: 1
+# Retains the deterministic FP32 debug defaults. For throughput use h100_ddp
+# (two/four devices) or explicitly choose precision and deterministic overrides.

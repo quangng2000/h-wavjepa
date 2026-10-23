@@ -21,6 +21,7 @@ unmeasured. See [recorded validation evidence](VALIDATION.md).
 | State strides | Low/medium/high: 1, 2, 4 |
 | Training budget | 375,000 optimizer steps |
 | Learning rate | Peak 0.0002; 100,000-step warmup, then cosine decay |
+| AdamW | Betas (0.9, 0.98), epsilon 1e-6, weight decay **0.04** |
 | EMA | 0.999 to 0.99999 over the first 100,000 optimizer steps |
 | Two-H100 batch | 32 examples per rank, 64 globally; incomplete training batches dropped |
 
@@ -30,12 +31,32 @@ and EMA upper maps now receive the same normalized top-eight-layer readout
 transformation. The masked branch's existing teacher tokens are reused for
 future targets, avoiding a duplicate nine-window teacher pass.
 
+Before committing a full budget, inspect the held-out [temporal diagnostics](TEMPORAL_DIAGNOSTICS.md)
+for each level. A representation can vary across recordings but remain constant
+within each recording, making prediction easy without useful temporal dynamics.
+Persistence and context-order controls expose this risk; they do not prove that
+the hierarchy learns a better representation.
+
 The original [WavJEPA recipe](https://arxiv.org/html/2509.23238v1#S3.SS2) reports
 1.74 million AudioSet clips, eight random two-second crops per clip, and 375,000
 steps on two H100s. Matching the step count here does **not** match its crop
 sampling, optimizer batch, audio exposure, or compute. Record the available
 AudioSet subset and manifest hashes: missing source clips can change the cohort.
 No elapsed training time is inferred from that paper.
+
+The weight decay of **0.04** is a project adaptation; the vendored WavJEPA
+constructor defaults to **0.01**. It is not a claim about the paper's resolved
+training configuration. Keep the value matched across comparison arms and record
+any `model.optimizer.weight_decay` override.
+
+`audioset` inherits the CPU, deterministic FP32 trainer so configuration/debugging
+does not implicitly select GPUs. `trainer=gpu` selects one GPU and keeps those
+precision/determinism settings. The `audioset_h100`/`audioset_h100_four` presets
+explicitly use BF16 and allow nondeterministic kernels for throughput; this
+difference is recorded in the resolved configuration. They disable DDP's unused
+parameter search for the complete default objective and bound collective waits
+to 180 seconds. If disabling a loss branch without freezing its parameters, set
+`trainer.strategy.find_unused_parameters=true`.
 
 `upstream_hierarchical` and `upstream_pretrained` retain nine 32,160-sample
 windows: 18.09 seconds total, 10.05 seconds observed, and target-end horizons

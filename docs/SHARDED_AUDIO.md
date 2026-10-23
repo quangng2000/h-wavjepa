@@ -38,7 +38,17 @@ Use `callbacks=step_checkpoint` for production streaming runs. It writes the
 latest full model/optimizer/loop state every 5,000 optimizer updates, even when
 validation does not improve, and explicitly saves the final state when training
 ends normally between intervals. Retention is one latest step file plus a local
-`last.ckpt` symlink. An additional callback keeps one best validation checkpoint;
+`last.ckpt` symlink. Step files are serialized to a temporary sibling, flushed,
+and atomically renamed; the alias is also atomically replaced. The previous step
+file is removed only after the new alias is published, so an interrupted save
+leaves the previous `last.ckpt` usable. This guarantee applies to the local
+`StepCheckpoint` callback; a host/disk loss still requires a durable copy.
+SIGKILL can leave an orphan temporary or fully written step file, so successful-save
+retention is not a crash-cleanup guarantee. Inspect owned leftovers before reuse.
+A rank-zero serialization failure inside Lightning can leave peer ranks at its
+save barrier until launcher teardown or the configured collective timeout; atomic
+publication does not promise immediate cross-rank exception delivery.
+An additional callback keeps one best validation checkpoint;
 disable that optional file with `callbacks.best_checkpoint=null`. Checkpoint names
 use update numbers, since this infinite iterator remains in epoch zero.
 
@@ -59,7 +69,19 @@ GPU count, or worker count requires clearing that owned cache after the old job
 stops, or selecting another empty directory. Old cache directories still occupy
 disk until removed. Cache reuse rechecks SHA256, and a corrupt cached object is
 downloaded again. Interrupted S3 response bodies retry the whole object up to three
-times; checksum mismatches fail closed. No complete corpus extraction is needed.
+times; checksum mismatches fail closed. `data.download_timeout_seconds=120` bounds
+the complete GET/body/retry operation, including a slow response that keeps making
+progress. This Unix signal deadline also protects synchronous held-out reads and
+respects an earlier outer probe deadline. No complete corpus extraction is needed.
+
+`data.worker_timeout_seconds=180` bounds the wait for a spawned worker batch.
+The H100 DDP strategy sets a separate 180-second collective timeout, so a failed
+reader cannot leave peers waiting for the former 30-minute default. These are
+failure bounds, not recovery: a stalled/failed rank aborts the job. A bounded
+training segment additionally uses its existing parent-process watchdog to stop
+all owned ranks and workers. Nonfinite updates remain fail-closed; optimizer/EMA
+steps are not silently skipped. These changes have local CPU tests but still need
+a fresh GPU streaming acceptance run.
 
 Training assigns each shard to exactly one rank and worker. Each worker shuffles
 its owned shards and a bounded sample buffer, cycles them indefinitely, and chooses
@@ -67,6 +89,23 @@ a deterministic random contiguous crop per recording and local pass. Every batch
 is full; no short recording is padded. Workers can complete passes at different
 times, so this stream has no synchronized whole-corpus epoch. The fixed ownership
 means ranks/workers do not independently sample the same shard.
+
+The default `data.shuffle_buffer=128` is **per worker**, against source shards of
+roughly 2,000 clips. It mixes nearby samples in that worker's sequential shard
+stream; it is not a corpus-wide shuffle or an IID sampler. Away from shard
+transitions, one rank's batch is usually dominated by one source shard; with four
+ranks the 64-recording regularizer population is then dominated by roughly four
+source shards. Older buffered examples can cross a shard boundary. More workers
+do not guarantee that a single global batch covers more sources, because PyTorch
+assembles each rank's batch from one worker. The gathered regularizer population
+inherits these correlations. Report worker count and shuffle-buffer size with
+results and compare mixing sizes/seeds when evaluating regularization.
+
+Larger `data.shuffle_buffer` values can mix across more adjacent shards but
+increase initial loading and worker RAM: the buffer retains WAV bytes before
+decoding, approximately 40 MB for 128 ten-second clips or 1.3 GB for 4,096 clips
+per worker, plus Python/prefetch overhead. Larger buffers still do not establish
+IID sampling. The cache's disk limit is separate from this RAM cost.
 
 Validation and test read their own held-out source shards with deterministic crops.
 They divide contiguous recording ranges across ranks, using one reader and the
@@ -85,9 +124,17 @@ validation loader; it does not become a complete training cohort.
 
 Checkpoint resume restores model/optimizer state, but WebDataset iterator positions
 and prefetched batches are **not** checkpointed. By default the loader refuses a
-resume. Explicitly set `data.allow_stream_restart_on_resume=true` to accept replaying
-the deterministic data sequence from its beginning; the index SHA must still match.
-This is not bitwise-equivalent to an uninterrupted run.
+resume. Explicitly set `data.allow_stream_restart_on_resume=true` to accept a new
+iteration from cycle zero; the index SHA must still match. With an unchanged
+configured seed, resume advances the previous effective stream seed by one and
+records both `configured_seed` and `stream_seed` in checkpoint state. A deliberately
+changed `data.seed` is used as supplied. This avoids exactly replaying the same
+deterministic prefix, but previously seen recordings can still recur: it does not
+recover sample positions or guarantee disjoint data across segments. Legacy
+checkpoints without seed metadata advance the configured seed once.
+The bounded segment runner explicitly uses `base_seed + resumed_global_step`;
+that policy remains unchanged. None of these modes is bitwise-equivalent to an
+uninterrupted run.
 
 The fast presets sample training diagnostics every 50 updates (plus the first
 step of each run); `train/*_epoch` therefore means an average of sampled batches.

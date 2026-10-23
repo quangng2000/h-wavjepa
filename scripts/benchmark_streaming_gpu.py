@@ -20,6 +20,7 @@ import os
 import shutil
 import statistics
 import sys
+import tempfile
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -34,6 +35,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.benchmark_gpu import atomic_report  # noqa: E402
+
+
+def scratch_directory(parent: Path, output: Path) -> Path:
+    """Keep audio and full checkpoints out of the platform's /output artifact tree.
+
+    A platform kill bypasses finally blocks. Small reports belong in output;
+    disposable shard caches must remain outside it even after that hard kill.
+    """
+    parent, output = parent.expanduser().resolve(), output.expanduser().resolve()
+    for forbidden in (Path("/output").resolve(), output):
+        if parent == forbidden or forbidden in parent.parents:
+            raise ValueError("Benchmark scratch must be outside /output and the report directory")
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="hwavjepa-streaming-", dir=parent))
 
 
 def worker_facts(loader) -> dict:
@@ -157,6 +172,23 @@ class StreamingTimings(L.Callback):
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         torch.cuda.synchronize()
+        if trainer.global_step in (1, self.warmup) or trainer.global_step % 25 == 0:
+            atomic_report(
+                self.output / f"progress-rank-{trainer.global_rank}.json",
+                {
+                    **self.worker_facts,
+                    "ok": False,
+                    "stage": "training_incomplete",
+                    "rank": trainer.global_rank,
+                    "world_size": trainer.world_size,
+                    "optimizer_steps": trainer.global_step,
+                    "ema_updates": int(pl_module.ema_updates),
+                    "requested_steps": self.steps,
+                    "elapsed_seconds_after_first_batch": time.perf_counter() - self.wall_started,
+                    "rank_cache": _cache_inventory(self.cache, trainer.global_rank),
+                    "frozen_index_sha256": self.frozen_sha,
+                },
+            )
         if trainer.is_global_zero and trainer.global_step % 100 == 0:
             print(
                 f"streaming train progress: step={trainer.global_step}/{self.steps} "
@@ -323,31 +355,29 @@ def run(args):
     if not torch.cuda.is_bf16_supported():
         raise RuntimeError("The streaming benchmark requires BF16-capable CUDA hardware")
     dist.init_process_group("nccl", timeout=timedelta(seconds=180))
-    cache = args.output.parent / f"{args.output.name}-temporary-audio-cache"
-    checkpoint_path = args.output.parent / f"{args.output.name}-temporary.ckpt"
     setup = [None]
     if rank == 0:
-        owns_cache = False
+        scratch = None
         try:
             args.output.mkdir(parents=True, exist_ok=False)
-            if checkpoint_path.exists():
-                raise FileExistsError("Refusing to replace an existing temporary checkpoint")
-            cache.mkdir(exist_ok=False)
-            owns_cache = True
+            scratch = scratch_directory(args.scratch_parent, args.output)
             setup[0] = {
+                "scratch": str(scratch),
                 "frozen": freeze_index(
                     args.output, args.endpoint, devices=world, workers=args.workers
-                )
+                ),
             }
         except Exception as error:
-            if owns_cache:
-                shutil.rmtree(cache, ignore_errors=True)
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
             setup[0] = {"error": type(error).__name__}
     dist.broadcast_object_list(setup, src=0)
     if "error" in setup[0]:
         dist.destroy_process_group()
         raise RuntimeError(f"Frozen dataset setup failed: {setup[0]['error']}")
     frozen = setup[0]["frozen"]
+    scratch = Path(setup[0]["scratch"])
+    cache, checkpoint_path = scratch / "audio-cache", scratch / "checkpoint.ckpt"
     if rank == 0:
         print(
             f"streaming index frozen: status={frozen['status']} "
@@ -450,8 +480,7 @@ def run(args):
         dist.barrier()
     finally:
         if rank == 0:
-            checkpoint_path.unlink(missing_ok=True)
-            shutil.rmtree(cache, ignore_errors=True)
+            shutil.rmtree(scratch, ignore_errors=True)
         dist.destroy_process_group()
 
 
@@ -463,6 +492,12 @@ def main():
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--scratch-parent",
+        type=Path,
+        default=Path("/tmp"),
+        help="Disposable cache/checkpoint root, outside /output",
+    )
     parser.add_argument(
         "--endpoint",
         default=os.environ.get("HWAVJEPA_S3_ENDPOINT", "https://storage.givemeanode.com"),

@@ -173,3 +173,79 @@ def test_fast_optimizer_keeps_lightning_bf16_gradient_clipping(make_config, tmp_
     assert trainer.gradient_clip_val == 1.0
     assert trainer.global_step == 1
     assert not torch.equal(model.weight.detach(), before)
+
+
+@pytest.mark.integration
+def test_interrupted_checkpoint_write_preserves_previous_last(tmp_path, monkeypatch):
+    latest = StepCheckpoint(dirpath=tmp_path / "latest", every_n_train_steps=2)
+    trainer = L.Trainer(
+        max_steps=5, callbacks=[latest], limit_val_batches=0, **trainer_options(tmp_path)
+    )
+    original = trainer.save_checkpoint
+
+    def interrupted(filepath, *args, **kwargs):
+        if trainer.global_step == 4:
+            Path(filepath).write_bytes(b"incomplete serialization")
+            raise OSError("simulated interrupted write")
+        original(filepath, *args, **kwargs)
+
+    monkeypatch.setattr(trainer, "save_checkpoint", interrupted)
+    with pytest.raises(OSError, match="interrupted write"):
+        trainer.fit(TinyModel(), train_dataloaders=DataLoader(InfiniteOnes(), batch_size=2))
+    state = torch.load(latest.last_model_path, weights_only=True)
+    assert state["global_step"] == 2
+    assert Path(latest.last_model_path).is_symlink()
+    assert not list((tmp_path / "latest").glob("*.partial"))
+    assert len([p for p in (tmp_path / "latest").glob("*.ckpt") if not p.is_symlink()]) == 1
+
+
+@pytest.mark.integration
+def test_failed_alias_replacement_keeps_previous_target_until_publication(tmp_path, monkeypatch):
+    import os
+
+    latest = StepCheckpoint(dirpath=tmp_path / "latest", every_n_train_steps=2)
+    trainer = L.Trainer(
+        max_steps=5, callbacks=[latest], limit_val_batches=0, **trainer_options(tmp_path)
+    )
+    original = os.replace
+
+    def interrupted(source, destination):
+        if trainer.global_step == 4 and Path(destination).name == "last.ckpt":
+            raise OSError("simulated alias replacement failure")
+        return original(source, destination)
+
+    monkeypatch.setattr(os, "replace", interrupted)
+    with pytest.raises(RuntimeError, match="last-checkpoint publication"):
+        trainer.fit(TinyModel(), train_dataloaders=DataLoader(InfiniteOnes(), batch_size=2))
+    assert torch.load(latest.last_model_path, weights_only=True)["global_step"] == 2
+    # The completed replacement remains available too; retention waits for alias publication.
+    paths = [p for p in (tmp_path / "latest").glob("*.ckpt") if not p.is_symlink()]
+    assert sorted(torch.load(p, weights_only=True)["global_step"] for p in paths) == [2, 4]
+    assert not list((tmp_path / "latest").glob("*.partial"))
+
+
+@pytest.mark.integration
+def test_first_checkpoint_resumes_in_same_directory_without_dangling_last_alias(tmp_path):
+    directory = tmp_path / "latest"
+    first = StepCheckpoint(dirpath=directory, every_n_train_steps=2)
+    trainer = L.Trainer(
+        max_steps=2, callbacks=[first], limit_val_batches=0, **trainer_options(tmp_path)
+    )
+    trainer.fit(TinyModel(), train_dataloaders=DataLoader(InfiniteOnes(), batch_size=2))
+    saved = torch.load(directory / "last.ckpt", weights_only=True)
+    assert saved["callbacks"][first.state_key]["last_model_path"] == str(directory / "last.ckpt")
+    resumed = StepCheckpoint(dirpath=directory, every_n_train_steps=2)
+    trainer = L.Trainer(
+        max_steps=4, callbacks=[resumed], limit_val_batches=0, **trainer_options(tmp_path)
+    )
+    trainer.fit(
+        TinyModel(),
+        train_dataloaders=DataLoader(InfiniteOnes(), batch_size=2),
+        ckpt_path=str(directory / "last.ckpt"),
+        weights_only=True,
+    )
+    assert Path(resumed.last_model_path) == directory / "last.ckpt"
+    assert (directory / "last.ckpt").is_symlink()
+    assert torch.load(directory / "last.ckpt", weights_only=True)["global_step"] == 4
+    assert not list(directory.glob("last-v*.ckpt"))
+    assert len([p for p in directory.glob("*.ckpt") if not p.is_symlink()]) == 1

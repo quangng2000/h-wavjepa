@@ -32,8 +32,22 @@ full-run overhead. Calendar discounts are not included.
 The initial live streaming probe was stopped before producing a timing result.
 Its input workers used the unsafe Linux fork-after-NCCL combination, but its logs
 did not establish the exact stall location. Both loaders now explicitly
-spawn worker processes; corrected live streaming validation is required before
-these compute projections qualify a full training run.
+spawn worker processes. The subsequent four-H100 spawn-worker probe
+`job-t79w4` (October 22, 2026, 7:11–7:19 p.m. Pacific) reached 300 of 400 requested
+updates before its duration cap. It produced no completed acceptance report, full
+held-out validation, or checkpoint roundtrip. Later intervals slowed, so the
+cached-audio projections above are not validated for S3 streaming. Its output
+capture also failed above the platform's 5 GiB artifact limit: the disposable
+cache was incorrectly a sibling of the report directory under `/output`.
+
+The benchmark now places scratch audio and the full temporary checkpoint in a
+unique directory under `/tmp` (or `--scratch-parent` outside `/output`) and writes
+small per-rank progress receipts every 25 updates. A hard kill can leave scratch
+on the job disk but cannot include it in the `/output` artifact. Incomplete
+progress receipts are explicitly `ok=false`; only completed training, every-rank
+refills, full held-out validation, and checkpoint verification create the success
+report. These fixes have CPU tests and **have not been revalidated on GPUs**.
+A passing live streaming acceptance run remains required before full training.
 
 ## Available controls
 
@@ -61,6 +75,13 @@ The streaming probe uses one worker per rank and measures input separately.
   two-H100 preset retains checkpointing for lower memory use.
 - Persistent input workers prefetch batches. For stored shards, follow the
   [WebDataset input guide](SHARDED_AUDIO.md) and benchmark cold cache refills.
+
+Official mask generation still runs on the main process's CPU before transfer.
+A local Mac microbenchmark measured about 19.6 ms for 144 windows and 38.5 ms for
+288 windows; these are not H100 measurements or an established training speedup.
+Two redundant CUDA mask-validation synchronizations were removed; upstream mask
+sampling semantics remain unchanged. Moving this work into data workers needs a
+separate measurement and reproducibility check.
 
 The fast presets retain ordinary AdamW: Lightning 2.6.6 rejects its fused variant
 with mixed precision and nonzero gradient clipping. A GPU probe exposed this, and
@@ -112,7 +133,7 @@ credentials and index environment variables described in the streaming guide.
 ```bash
 torchrun --standalone --nproc_per_node=4 scripts/benchmark_streaming_gpu.py \
   --devices 4 --compact --steps 400 --warmup 25 --workers 1 \
-  --output /output/streaming-benchmark
+  --output /output/streaming-benchmark --scratch-parent /tmp
 ```
 
 These scripts do not provision resources or authorize spending. An external job
@@ -136,5 +157,7 @@ SFCompute's checked batch-job duration ceiling was 720 minutes, with a self-serv
 increase available up to 1,440 minutes. A longer run needs planned checkpointed
 segments and allowance for queue delays. Merely setting the platform's
 `resume=checkpoint` does not wire a training program to discover, load or capture
-its checkpoint. The current streaming loader explicitly restarts worker sequences
-on an opted-in resume; it does not restore prefetched sample positions.
+its checkpoint. The streaming loader explicitly restarts worker sequences with
+a recorded new seed on an opted-in resume; it does not restore prefetched sample
+positions. The bounded segment runner's explicit base-plus-resumed-step data seed
+policy avoids exact deterministic-prefix replay, not all repeated recordings.

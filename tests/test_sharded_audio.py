@@ -622,3 +622,122 @@ def test_actual_stager_archive_can_be_consumed_without_repacking(tmp_path, monke
     batch = next(iter(data.train_dataloader()))["waveform"]
     assert batch.shape == (2, 145440)
     assert torch.equal(batch, torch.full((2, 145440), 1 / 32768))
+
+
+def test_total_download_deadline_bounds_slow_progress_not_only_socket_silence(tmp_path):
+    import time
+
+    store = FakeS3()
+    shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
+
+    class SlowBody(io.BytesIO):
+        def read(self, size=-1):
+            time.sleep(0.01)
+            return super().read(1)
+
+    store.get_object = lambda **kwargs: {"Body": SlowBody(store.objects[shard["key"]])}
+    cache = streaming._ShardCache(
+        tmp_path, store, "private", shard["bytes"], 0, download_timeout_seconds=0.05
+    )
+    start = time.monotonic()
+    with pytest.raises(streaming.ShardDownloadTimeout, match="total deadline"):
+        cache.get(shard)
+    assert time.monotonic() - start < 1
+    assert not list(tmp_path.glob("*.tar"))
+    assert not list(tmp_path.glob("*.partial"))
+    # The signal handler/timer is restored, so a later valid read works normally.
+    store.get_object = lambda **kwargs: {"Body": io.BytesIO(store.objects[shard["key"]])}
+    assert cache.get(shard).read_bytes() == store.objects[shard["key"]]
+
+
+def test_resumed_stream_uses_recorded_new_seed_and_explicit_seed_wins(tmp_path, monkeypatch):
+    data, _ = module(
+        tmp_path, monkeypatch, train_random_crop=True, seed=19, allow_stream_restart_on_resume=True
+    )
+    state = data.state_dict()
+    iterator = iter(data.train_dataloader())
+    before = torch.cat([next(iterator)["waveform"] for _ in range(4)])
+    del iterator
+    data.load_state_dict(state)
+    assert data.state_dict()["stream_seed"] == 20
+    iterator = iter(data.train_dataloader())
+    after = torch.cat([next(iterator)["waveform"] for _ in range(4)])
+    del iterator
+    assert not torch.equal(before, after)
+    state = data.state_dict()
+    data.load_state_dict(state)
+    assert data.state_dict()["stream_seed"] == 21
+    # Calling setup again must not advance the same restored state twice.
+    data.setup("fit")
+    assert data.state_dict()["stream_seed"] == 21
+    data.hparams.seed = 1019
+    data.load_state_dict(state)
+    assert data.state_dict()["configured_seed"] == 1019
+    assert data.state_dict()["stream_seed"] == 1019
+
+
+def test_spawned_loader_has_bounded_wait_and_synchronous_reader_uses_zero_timeout(
+    tmp_path, monkeypatch
+):
+    data, _ = module(
+        tmp_path,
+        monkeypatch,
+        num_workers=1,
+        persistent_workers=True,
+        prefetch_factor=2,
+        worker_timeout_seconds=30,
+        download_timeout_seconds=20,
+    )
+    assert data.train_dataloader().timeout == 30
+    assert data.val_dataloader().timeout == 0
+    with pytest.raises(ValueError, match="less than worker"):
+        module(tmp_path, monkeypatch, download_timeout_seconds=180, worker_timeout_seconds=180)
+
+
+def test_object_deadline_escapes_sdk_retry_wrapper_and_becomes_worker_exception(tmp_path):
+    import time
+
+    store = FakeS3()
+    shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
+    swallowed = []
+
+    def blocked_get(**kwargs):
+        try:
+            time.sleep(2)
+        except Exception:
+            swallowed.append(True)
+            raise AssertionError("An SDK retry wrapper must not swallow hard cancellation")
+
+    store.get_object = blocked_get
+    cache = streaming._ShardCache(
+        tmp_path, store, "private", shard["bytes"], 0, download_timeout_seconds=0.02
+    )
+    with pytest.raises(streaming.ShardDownloadTimeout):
+        cache.get(shard)
+    assert not swallowed
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_earlier_outer_deadline_exception_is_invoked_outside_sdk_retry_wrapper():
+    import signal
+    import time
+
+    previous = signal.getsignal(signal.SIGALRM)
+    swallowed = []
+
+    def outer_expired(signum, frame):
+        raise TimeoutError("outer job deadline")
+
+    signal.signal(signal.SIGALRM, outer_expired)
+    signal.setitimer(signal.ITIMER_REAL, 0.02)
+    try:
+        with pytest.raises(TimeoutError, match="outer job deadline"), streaming._read_deadline(1):
+            try:
+                time.sleep(2)
+            except Exception:
+                swallowed.append(True)
+                raise AssertionError("SDK swallowed outer deadline")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert not swallowed

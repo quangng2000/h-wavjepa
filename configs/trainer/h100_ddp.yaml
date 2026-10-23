@@ -4,8 +4,16 @@ defaults:
 accelerator: gpu
 devices: 2
 num_nodes: 1
-strategy: ddp_find_unused_parameters_true
+strategy:
+  _target_: lightning.pytorch.strategies.DDPStrategy
+  # The default masked + forecasting objective uses every trainable parameter.
+  # If disabling branches, use find_unused_parameters=true or freeze that branch.
+  find_unused_parameters: false
+  timeout:
+    _target_: datetime.timedelta
+    seconds: 180
 precision: bf16-mixed
+# Throughput preset: seeded inputs/masks, without forcing deterministic kernels.
 deterministic: false
 # WAVManifestDataModule owns rank sharding, epochs and full training batches.
 use_distributed_sampler: false

@@ -13,11 +13,14 @@ import hashlib
 import io
 import itertools
 import json
+import math
 import os
 import random
 import re
 import shutil
+import signal
 import sys
+import threading
 import time
 import wave
 from pathlib import Path, PurePosixPath
@@ -34,6 +37,51 @@ SPLITS = ("train", "val", "test")
 GIB = 1024**3
 SHA = re.compile(r"[a-f0-9]{64}")
 VIDEO = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+class _ReadDeadlineExpired(BaseException):
+    """Escape SDK catch-all Exception retry wrappers before converting to a loader error."""
+
+
+class ShardDownloadTimeout(RuntimeError):
+    """Total object deadline, distinct from a retryable socket timeout."""
+
+
+@contextlib.contextmanager
+def _read_deadline(seconds: float):
+    """Bound GET, every response read, and retries on our Unix input processes.
+
+    Socket timeouts alone permit an indefinitely slow but advancing response.
+    DataLoader workers and synchronous held-out readers run on their main thread.
+    An earlier outer one-shot deadline remains earlier; periodic alarms are refused.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Bounded shard reads require the process main thread")
+    remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+    previous = signal.getsignal(signal.SIGALRM)
+    if interval or (remaining and not callable(previous)):
+        raise RuntimeError("Cannot safely nest a shard read inside this process alarm")
+    outer_deadline = time.monotonic() + remaining if remaining else None
+    use_outer = remaining and remaining <= seconds
+
+    def expired(signum, frame):
+        raise _ReadDeadlineExpired(signum, frame)
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, min(remaining, seconds) if remaining else seconds)
+    try:
+        yield
+    except _ReadDeadlineExpired as error:
+        # Invoke an earlier owner's handler only after unwinding SDK retry wrappers.
+        # Its ordinary Exception must not be swallowed inside the network operation.
+        if use_outer:
+            previous(*error.args)
+        raise ShardDownloadTimeout("Audio shard read exceeded its total deadline") from error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if outer_deadline is not None:
+            signal.setitimer(signal.ITIMER_REAL, max(0, outer_deadline - time.monotonic()))
 
 
 def _s3_client(endpoint: str):
@@ -66,16 +114,17 @@ def _safe_key(value: str) -> bool:
     )
 
 
-def _read_index(index_path: str, endpoint: str) -> tuple[dict, str]:
+def _read_index(index_path: str, endpoint: str, timeout_seconds: float = 120) -> tuple[dict, str]:
     parsed = urlparse(index_path)
     if parsed.scheme == "s3":
         if not parsed.netloc or not _safe_key(parsed.path.lstrip("/")) or parsed.query:
             raise ValueError("Expected s3://bucket/key without credentials or query parameters")
-        response = _s3_client(endpoint).get_object(
-            Bucket=parsed.netloc, Key=parsed.path.lstrip("/")
-        )
-        with contextlib.closing(response["Body"]) as body:
-            raw = body.read(16 * 1024**2 + 1)
+        with _read_deadline(timeout_seconds):
+            response = _s3_client(endpoint).get_object(
+                Bucket=parsed.netloc, Key=parsed.path.lstrip("/")
+            )
+            with contextlib.closing(response["Body"]) as body:
+                raw = body.read(16 * 1024**2 + 1)
     elif not parsed.scheme:
         with Path(index_path).expanduser().open("rb") as handle:
             raw = handle.read(16 * 1024**2 + 1)
@@ -177,9 +226,18 @@ def _heldout_ranges(shards: list[dict], split: str, rank: int, quota: int):
 class _ShardCache:
     """One consumer owns one bounded directory, including its in-flight download."""
 
-    def __init__(self, directory: Path, client, bucket: str, budget: int, minimum_free: int):
+    def __init__(
+        self,
+        directory: Path,
+        client,
+        bucket: str,
+        budget: int,
+        minimum_free: int,
+        download_timeout_seconds: float = 120,
+    ):
         self.directory, self.client, self.bucket = directory, client, bucket
         self.budget, self.minimum_free = budget, minimum_free
+        self.download_timeout_seconds = download_timeout_seconds
         directory.mkdir(parents=True, exist_ok=True)
 
     def get(self, shard: dict) -> Path:
@@ -215,33 +273,37 @@ class _ShardCache:
 
         # botocore retries failed requests, but not interrupted StreamingBody reads.
         # Restart those whole objects; never retain a partially verified download.
-        for attempt in range(3):
-            digest, size = hashlib.sha256(), 0
-            try:
-                response = self.client.get_object(Bucket=self.bucket, Key=shard["key"])
-                with contextlib.closing(response["Body"]) as body, temporary.open("xb") as output:
-                    for chunk in iter(lambda: body.read(1024**2), b""):
-                        size += len(chunk)
-                        if size > shard["bytes"]:
-                            raise ValueError("Audio shard exceeded its indexed byte size")
-                        digest.update(chunk)
-                        output.write(chunk)
-                if size != shard["bytes"] or digest.hexdigest() != shard["sha256"]:
-                    raise ValueError("Audio shard byte size or SHA256 mismatch")
-                temporary.replace(path)
-                return path
-            except (
-                ConnectionResetError,
-                TimeoutError,
-                IncompleteReadError,
-                ReadTimeoutError,
-                ResponseStreamingError,
-            ):
-                if attempt == 2:
-                    raise
-                time.sleep(0.25 * 2**attempt)
-            finally:
-                temporary.unlink(missing_ok=True)
+        with _read_deadline(self.download_timeout_seconds):
+            for attempt in range(3):
+                digest, size = hashlib.sha256(), 0
+                try:
+                    response = self.client.get_object(Bucket=self.bucket, Key=shard["key"])
+                    with (
+                        contextlib.closing(response["Body"]) as body,
+                        temporary.open("xb") as output,
+                    ):
+                        for chunk in iter(lambda: body.read(1024**2), b""):
+                            size += len(chunk)
+                            if size > shard["bytes"]:
+                                raise ValueError("Audio shard exceeded its indexed byte size")
+                            digest.update(chunk)
+                            output.write(chunk)
+                    if size != shard["bytes"] or digest.hexdigest() != shard["sha256"]:
+                        raise ValueError("Audio shard byte size or SHA256 mismatch")
+                    temporary.replace(path)
+                    return path
+                except (
+                    ConnectionResetError,
+                    TimeoutError,
+                    IncompleteReadError,
+                    ReadTimeoutError,
+                    ResponseStreamingError,
+                ):
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.25 * 2**attempt)
+                finally:
+                    temporary.unlink(missing_ok=True)
 
 
 def _manifest(raw: bytes, split: str, expected: dict) -> set[str]:
@@ -364,6 +426,7 @@ class _AudioStream(IterableDataset):
                 self.config["bucket"],
                 self.cache_budget,
                 self.config["cache_min_free_gib"] * GIB,
+                self.config.get("download_timeout_seconds", 120),
             )
             for stale in directory.glob("*.partial"):
                 stale.unlink()
@@ -437,6 +500,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
         shuffle_buffer: int = 128,
         allow_partial_index: bool = False,
         allow_stream_restart_on_resume: bool = False,
+        worker_timeout_seconds: float = 180,
+        download_timeout_seconds: float = 120,
     ):
         super().__init__()
         for key, value in {
@@ -447,6 +512,19 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "shuffle_buffer": shuffle_buffer,
         }.items():
             _positive_integer(value, key)
+        for name, value in {
+            "worker_timeout_seconds": worker_timeout_seconds,
+            "download_timeout_seconds": download_timeout_seconds,
+        }.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive number")
+        if download_timeout_seconds >= worker_timeout_seconds:
+            raise ValueError("download_timeout_seconds must be less than worker_timeout_seconds")
         _positive_integer(num_workers, "num_workers", minimum=0)
         _positive_integer(seed, "seed", minimum=0)
         if prefetch_factor is not None:
@@ -478,12 +556,15 @@ class ShardedAudioDataModule(L.LightningDataModule):
         self.index_sha256 = None
         self.shards = None
         self._restored_state = None
+        self._stream_seed = seed
         self.evaluation_coverage = {}
 
     def setup(self, stage=None):
         if self.index is None:
             self.index, self.index_sha256 = _read_index(
-                self.hparams.index_path, self.hparams.endpoint
+                self.hparams.index_path,
+                self.hparams.endpoint,
+                self.hparams.download_timeout_seconds,
             )
             self.shards = _validate_index(
                 self.index, self.hparams.endpoint, self.hparams.allow_partial_index
@@ -540,6 +621,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
         return {
             "index_sha256": self.index_sha256,
             "stream_position_checkpointed": False,
+            "configured_seed": self.hparams.seed,
+            "stream_seed": self._stream_seed,
             "evaluation_coverage": self.evaluation_coverage,
         }
 
@@ -551,6 +634,14 @@ class ShardedAudioDataModule(L.LightningDataModule):
                 "Streaming positions are not checkpointed. Set allow_stream_restart_on_resume=true "
                 "to explicitly restart each rank/worker's data sequence while restoring optimizer state."
             )
+        # Same config on resume must not deterministically replay its cycle-zero prefix.
+        # An explicitly changed seed (e.g. bounded segments' base+resume_step) wins.
+        if state.get("configured_seed", self.hparams.seed) == self.hparams.seed:
+            previous = state.get("stream_seed", self.hparams.seed)
+            _positive_integer(previous, "checkpoint stream_seed", minimum=0)
+            self._stream_seed = previous + 1
+        else:
+            self._stream_seed = self.hparams.seed
 
     def load_state_dict(self, state_dict):
         self._restored_state = state_dict
@@ -574,6 +665,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
             shards = _heldout_ranges(shards, split, self.rank, quota)
         config = dict(self.hparams)
         config.update(bucket=self.index["bucket"], cache_dir=self.cache_dir)
+        if split == "train":
+            config["seed"] = self._stream_seed
         dataset = _AudioStream(
             shards=shards,
             split=split,
@@ -591,6 +684,7 @@ class ShardedAudioDataModule(L.LightningDataModule):
             kwargs.update(
                 persistent_workers=self.hparams.persistent_workers,
                 multiprocessing_context="spawn",
+                timeout=self.hparams.worker_timeout_seconds,
             )
             if self.hparams.prefetch_factor is not None:
                 kwargs["prefetch_factor"] = self.hparams.prefetch_factor

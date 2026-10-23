@@ -17,9 +17,13 @@ minimum_batch_size: 2
 require_full_length: true
 train_random_crop: true
 train_drop_last: true
+# Per worker, retaining WAV bytes: this is local mixing, not corpus-wide IID.
 shuffle_buffer: 128
+# Bound the entire object read (including retries), then stalled worker batches.
+download_timeout_seconds: 120
+worker_timeout_seconds: 180
 seed: ${seed}
 # Pilot only: production rejects incomplete staging indexes.
 allow_partial_index: false
-# Restores model/optimizer but deliberately restarts each worker's data sequence.
+# Restores model/optimizer; restarts iterators with a new recorded seed.
 allow_stream_restart_on_resume: false

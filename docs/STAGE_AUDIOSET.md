@@ -135,9 +135,9 @@ request can consume its bounded timeout/retry allowance before returning.
 
 ## Using the staged data
 
-These objects are verified storage artifacts. The current training datamodule
-still reads local WAV manifests and does not directly stream S3 tar shards. A
-training host must either materialize the selected archives with sufficient local
-disk or use a separately implemented and tested shard-streaming loader. Keep the
-source index and checksums with the eventual training run. Staging alone does not
-validate sustained two-H100 input throughput or downstream representation quality.
+Use the [verified sharded datamodule](SHARDED_AUDIO.md) to train directly from
+these private-S3 TAR objects with a bounded local cache. The separate
+`WAVManifestDataModule` route requires materialized local WAVs. Keep the frozen
+completed source index and checksums with the training run. Sharded-loader CPU
+tests cover integrity, workers, and rank ownership; staging alone does not validate
+sustained GPU input throughput or downstream representation quality.

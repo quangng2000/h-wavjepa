@@ -1,9 +1,11 @@
 import json
 import struct
 import wave
+from datetime import timedelta
 
 import pytest
 import torch
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
@@ -220,6 +222,11 @@ def test_audioset_presets_fit_real_ten_second_clips(make_config, experiment):
         assert not cfg.trainer.deterministic
         assert cfg.model.backbone.config.use_gradient_checkpointing
         assert cfg.data.batch_size * cfg.trainer.devices == 64
+        # Hydra must build an actual bounded DDP strategy, not pass a dict/string
+        # whose timeout is silently ignored by the Trainer.
+        strategy = instantiate(cfg.trainer.strategy)
+        assert strategy._timeout == timedelta(seconds=180)
+        assert strategy._ddp_kwargs["find_unused_parameters"] is False
     else:
         assert cfg.trainer.devices == 1
         assert cfg.trainer.precision == "32-true"

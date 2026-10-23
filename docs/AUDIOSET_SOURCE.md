@@ -84,10 +84,11 @@ originals: the largest source shard is under 2.87 GB. Account separately for
 parallel workers, unfinished uploads, and checkpoints.
 
 Object storage can hold prepared shard archives plus manifests and checksums.
-The current training loader requires local WAV paths; stored archives must be
-materialized into a sufficiently large filesystem before training unless a
-separate streaming loader is implemented. Staging in object storage alone does
-not make the corpus directly readable by `WAVManifestDataModule`.
+The [sharded training loader](SHARDED_AUDIO.md) reads those private-S3 TARs with
+verified, bounded local caching, without materializing the full corpus. The
+separate `WAVManifestDataModule` still requires local WAV paths. A completed,
+frozen index and passing GPU streaming validation remain prerequisites for the
+full training run.
 
 Source metadata, archive headers, and accessibility were inspected without
 downloading the audio corpus. Availability and integrity of every full shard

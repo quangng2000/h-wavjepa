@@ -297,9 +297,11 @@ class WavJEPABackbone(nn.Module):
             1,
             generator=np.random.default_rng(seed),
         )
-        masks = tuple(mask.to(audio.device) for mask in masks)
+        # The official masker constructs CPU tensors. Check them before the
+        # transfer so validity checks do not introduce CUDA-to-host barriers.
         if not masks[1].any() or not (~masks[0]).any(dim=1).all():
             raise RuntimeError("upstream masker produced an empty target or context")
+        masks = tuple(mask.to(audio.device) for mask in masks)
         output = self.model(audio, *masks)
         targets = output["targets"].detach().float().mean(dim=1)
         targets = targets.reshape(waveforms.shape[0], waveforms.shape[1], self.embedding_dim)

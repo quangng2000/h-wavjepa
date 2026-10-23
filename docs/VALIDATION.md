@@ -3,11 +3,11 @@
 Validated locally on CPU on 22 October 2026. These checks establish software
 behavior, not improved representation quality or reproduced benchmark scores.
 
-The current local suite reports **596 passed, 3 skipped** in 83.63 seconds.
+The current local suite reports **652 passed, 3 skipped** in 148.95 seconds.
 The skips require two BF16-capable CUDA devices, CUDA for the optional clustering
 parity check, and FFmpeg for the preparation integration test. The earlier
 two-H100 smoke and CPU preparation-host checks are recorded separately below.
-Ruff lint, Ruff formatting (115 files), and `uv lock --check` (113 packages) pass.
+Ruff lint, Ruff formatting (123 files), and `uv lock --check` (114 packages) pass.
 Previously recorded GitHub CI runs passed on Python 3.11, 3.12 and 3.13, plus
 the separate official HEAR smoke; this local run is not a new CI result.
 
@@ -48,10 +48,14 @@ It also exercises actual WAV training/evaluation, explicit dynamics embedding
 export, checkpoint hashes and finite-value/input validation.
 
 LocaLeReg checks cover byte-exact upstream source hashes, timewise adapter
-value/gradient agreement, fixed-cluster translation invariance, cluster filtering
-and fallback reporting, and independent float64 target-distribution quadrature at
-width 768. Tiny CPU training checks cover local clusters, gradients into the
-online waveform/context encoders and upper MLPs, checkpoint inference, and resume.
+argument/reduction/gradient plumbing, fixed-cluster translation invariance,
+cluster filtering and fallback reporting, and independent float64
+target-distribution quadrature at width 768. The timewise adapter comparison calls
+the same pinned upstream loss on both sides; it does not independently validate
+that loss. The analytic target-distribution checks and fixed-shape implementation
+comparison below provide separate numerical evidence. Tiny CPU training checks
+cover local clusters, gradients into the online waveform/context encoders and
+upper MLPs, checkpoint inference, and resume.
 These tests do not measure learned audio quality. The companion Lean build and
 axiom audit check only the stated [centering property](LOCALEREG.md#what-lean-establishes).
 
@@ -62,6 +66,24 @@ normalized readouts, gradient checkpointing, accumulation, real 10-second WAVs,
 rank-disjoint sampling and checkpoint resume. Both ranks finish with identical
 online/teacher state hashes, and EMA updates equal optimizer steps. The integration
 uses a small model and short windows; it is not an H100 throughput or memory test.
+
+A separate two-rank **FP32 full-objective** test compares loss, every trainable
+parameter gradient, two SGD-with-momentum updates, and online/EMA state against
+an independently assembled single-global-batch reference. It covers SIGReg and
+LocaLeReg, hierarchical and flat controls, a two-layer/top-two readout, and DDP
+with `find_unused_parameters=false`. Masks and random sketches are controlled
+and dropout is zero so the objectives are actually identical. This catches
+world-size loss-scaling errors; it does not assert exact equality for arbitrary
+BF16 data streams. Injected one-rank invalid inputs, losses and gradients also
+verify collective rejection before optimizer/EMA changes.
+
+HEAR regression tests use multiple layers and a nonidentity final LayerNorm to
+distinguish the trained normalized top-k readout from the historical readout.
+Export manifests record that choice and identify duplicate flat levels. EMA
+timing tests now compare parameter values with the post-optimizer student, so
+an update performed before the optimizer would fail. Synthetic temporal-collapse
+fixtures validate the [held-out diagnostics](TEMPORAL_DIAGNOSTICS.md); these
+diagnostics have not yet established useful temporal structure in a trained model.
 
 Data tests separately load a literal 160,000-sample recording into nine complete
 16,160-sample AudioSet windows without padding, verify segment bounds and epoch
@@ -104,12 +126,19 @@ An official Lightning Timer stops the iterator with `min_epochs=0` and preserves
 the final optimizer state. Tests also construct the fast presets' callbacks and
 exercise ordinary AdamW with BF16 mixed precision and gradient clipping; the
 unsupported fused-optimizer combination is rejected during configuration checks.
+Fault injection checks incomplete serialization and failed alias publication:
+the preceding `last.ckpt` remains readable. Resuming the first periodic checkpoint
+in the same directory preserves that stable alias. Successful saves bound
+retention; hard kills can leave orphan files, as detailed in the streaming guide.
 
 The sharded-input tests exercise actual WebDataset TAR decoding, source and
 manifest checksum rejection, private-read fixtures, bounded caches, real worker
 processes, rank-disjoint training and two-process collective validation. Resume
 tests reject an index change or unacknowledged worker-sequence restart. They do
 not establish exact iterator-position recovery, which is not implemented.
+Additional checks cover advancing and recording a restarted stream's seed,
+whole-object download deadlines across SDK retries, and temporary benchmark
+audio/checkpoints staying outside the platform's `/output` artifact directory.
 
 CPU tests for the bounded GPU benchmark programs verify local/S3 pilot checksums,
 safe extraction, unchanged global-batch/loss/schedule settings, all-rank report
