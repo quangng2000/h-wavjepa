@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "validated_at": "2026-10-23T18:15:54Z",
+  "scope": "SFCompute task-set retention protocol on CPU; not a four-H100 training or checkpoint acceptance test",
+  "job_id": "job-ns9zz",
+  "chip": "cpu-2",
+  "max_runners": 1,
+  "open_task_pool": true,
+  "initial_child_exit_code": 1,
+  "allocation_survived_child_failure": true,
+  "external_repair_task_accepted": true,
+  "same_supervisor_process": true,
+  "lease_extension_http_status": 200,
+  "task_result_uploads_accepted": 2,
+  "task_pool_sealed_after_success": true,
+  "charged_usd": 0.002,
+  "total_protocol_probes_charged_usd": 0.006,
+  "remaining_evidence": "Production worker and four GPU rank progress; new checkpoint publication."
+}

@@ -73,6 +73,51 @@ The transfer deadline is checked cooperatively around SDK operations; the extra
 time allows an in-flight request and the result broadcast to finish. It is not
 an exact wall-clock guarantee; the segment watchdog still bounds the whole job.
 
+## Retain four GPUs during a repair
+
+`scripts/retained_training_worker.py` wraps a resumed segment in an SFCompute
+open task set. A failed training subprocess ends, but the worker can keep the
+same four-GPU allocation while an explicit repair task is prepared. This is a
+new job type; an existing ordinary batch job cannot be converted in place.
+
+Use `tasks_open=true`, `task_max_runners=1`, `task_max_attempts=1`,
+`task_lease_minutes=120`, `max_restarts=0`, and `resume=none`. The worker renews
+its task lease while training. Supply a SHA256-pinned JSON launch plan and an
+initial task with `action: train` and the same `plan_sha256`.
+
+The plan fixes the resume command, checkpoint identity, source-file repair
+allowlist, output and scratch roots, total runtime, and spending ceiling. The
+current wrapper accepts `train_segment.py --resume`; it does not bootstrap the
+first clean-to-Nat handoff through `start_nat_segment.py`.
+
+All attempts share one absolute allocation deadline. The limits are at most
+seven hours, three training attempts, and **30 minutes total waiting for repairs**.
+Waiting and repair time are billed and reduce the time available for training;
+they never add another seven-hour budget. Training does not retry automatically.
+
+After `retained_waiting_for_explicit_repair`, inspect the failure and test the
+fix locally. Submit one repair through the provider's `add_tasks`, including
+`action: repair`, `after_attempt`, and the pinned `plan_sha256`. Optional patches
+must name an allowlisted source file and include its current SHA256, replacement
+SHA256, and base64 contents. Only the allowlisted NCCL environment switches may
+be changed. The worker rejects stale repairs and launch-argument overrides and
+terminates the old rank and data-worker process tree before another attempt.
+
+Each attempt resumes the latest fully verified private-S3 checkpoint and uses
+fresh output and scratch directories. Before a later attempt, prior failed
+output moves to the allocation's scratch disk so multiple large snapshots do
+not overflow the platform artifact limit. It remains available while that
+allocation lives, but only the current attempt and small task receipts are
+captured on exit; S3-published checkpoints remain durable.
+
+A task receipt can report a failed training attempt while the allocation stays
+alive. Job success still requires actual optimizer progress, matching EMA state,
+and a final verified checkpoint receipt. After the worker exits, call
+`seal_tasks` and inspect the job result and `tasks.drained`; a successful container
+exit alone does not mean an open task pool has been sealed. Provider preemption,
+hardware loss, exhausted credit, or the hard runtime limit can still release
+the allocation.
+
 ## Required inputs and credentials
 
 - A completed staging index, stored locally with its exact SHA256. Partial
