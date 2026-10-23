@@ -16,10 +16,10 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
-      - run: uv sync --frozen --extra hear --python ${{ matrix.python }}
-      - run: uv run --extra hear ruff check .
-      - run: uv run --extra hear ruff format --check .
-      - run: uv run --extra hear pytest
+      - run: uv sync --frozen --extra hear --extra data --python ${{ matrix.python }}
+      - run: uv run --extra hear --extra data ruff check .
+      - run: uv run --extra hear --extra data ruff format --check .
+      - run: uv run --extra hear --extra data pytest
       - run: uv run python -m src.train experiment=smoke
       - run: uv run python -m src.train experiment=upstream_smoke
       - uses: actions/checkout@v4

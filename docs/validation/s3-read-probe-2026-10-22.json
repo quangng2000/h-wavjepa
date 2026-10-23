@@ -1,0 +1,13 @@
+{
+  "date_utc": "2026-10-23",
+  "source_date_pacific": "2026-10-22",
+  "index_sha256": "42e52607e9a738b8b30d87517b2d9c8803ed0b6dd1daf58653da7f7d9be80abc",
+  "verified_sources": 99,
+  "source": "unbal_train000",
+  "bytes": 625715200,
+  "seconds": 6.5108605599962175,
+  "megabytes_per_second": 96.10330220316736,
+  "equivalent_clips_per_second": 299.9603480989208,
+  "sha256_verified": true,
+  "limitations": "One CPU2 S3 GET plus hash, no disk cache, decode, DDP, or training; active CPU staging was concurrent."
+}

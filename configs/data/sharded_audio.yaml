@@ -1,0 +1,25 @@
+_target_: src.data.sharded_audio_datamodule.ShardedAudioDataModule
+# Copy the immutable completed staging index, or use s3://bucket/path/index.json.
+index_path: ???
+endpoint: https://storage.givemeanode.com
+cache_dir: ${paths.data_dir}/shard-cache
+cache_max_gib: 40
+cache_min_free_gib: 2
+sample_rate: 16000
+num_samples: 145440
+# Per rank: 32 on two GPUs, 16 on four GPUs, for global batch 64.
+batch_size: 32
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+minimum_batch_size: 2
+require_full_length: true
+train_random_crop: true
+train_drop_last: true
+shuffle_buffer: 128
+seed: ${seed}
+# Pilot only: production rejects incomplete staging indexes.
+allow_partial_index: false
+# Restores model/optimizer but deliberately restarts each worker's data sequence.
+allow_stream_restart_on_resume: false
