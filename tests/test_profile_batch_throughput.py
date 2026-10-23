@@ -91,6 +91,9 @@ def test_candidate_retains_full_recipe_and_only_timing_callback(tmp_path, batch)
     assert cfg.model.lr_warmup_steps == cfg.model.ema_anneal_end_step == 100000
     assert cfg.ckpt_path == request["checkpoint"]
     assert cfg.trainer.max_steps == 523
+    assert cfg.data.download_timeout_seconds == 300
+    assert cfg.data.worker_timeout_seconds == request["timeout_seconds"] == 360
+    assert cfg.trainer.strategy.timeout.seconds == 420
     assert cfg.trainer.limit_val_batches == cfg.trainer.num_sanity_val_steps == 0
     assert cfg.trainer.enable_checkpointing is False and cfg.logger is None
     assert list(cfg.callbacks) == ["timing"]

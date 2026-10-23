@@ -104,8 +104,10 @@ def profile_config(value):
     cfg.trainer.enable_checkpointing = False
     cfg.trainer.enable_progress_bar = False
     cfg.trainer.enable_model_summary = False
-    # A failed rank/OOM must release peers quickly. No upload occurs in this job.
-    cfg.trainer.strategy.timeout = {"_target_": "datetime.timedelta", "seconds": 120}
+    # A cold rank may need the full 300s download / 360s worker allowance.
+    # Let the supervisor's default 360s wall cap stop and reap the whole group,
+    # rather than having healthy peers abort a collective during a slow fetch.
+    cfg.trainer.strategy.timeout = {"_target_": "datetime.timedelta", "seconds": 420}
     cfg.train, cfg.test = True, False
     return cfg
 
