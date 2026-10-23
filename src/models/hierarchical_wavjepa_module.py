@@ -4,9 +4,9 @@ WavJEPA's masked objective remains intact. Additional heads forecast future
 windows in distinct learned spaces, and their gradients reach the backbone.
 This observational audio extension is not H-JEPA's action-conditioned planner.
 
-References and adaptation choices: docs/UPSTREAM_DYNAMICS.md. Upper state
-encoders follow H-JEPA's experimental window_size=1 (pointwise), not temporal
-pooling; its per-level strides [2, 2] are cumulative state_strides [1, 2, 4] here.
+References and adaptation choices: docs/UPSTREAM_DYNAMICS.md. The pointwise
+baseline follows H-JEPA's experimental window_size=1. The optional temporal
+version pools causal, valid windows of lower states before each upper map.
 """
 
 import json
@@ -30,6 +30,7 @@ from src.objectives.localereg import LocaLeReg
 from src.objectives.sigreg import SOURCE_COMMIT as SIGREG_COMMIT
 from src.objectives.sigreg import SIGReg
 from src.objectives.temporal_diagnostics import forecast_diagnostics, recording_variance
+from src.objectives.temporal_variance import temporal_variance_floor
 from src.utils.runtime import all_ranks_true, require_finite_gradients
 
 
@@ -38,9 +39,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
 
     For context_windows=C, target index at level l is C-1+horizons[l].
     State stride subsamples past states, not raw samples or target windows. The
-    same final observed window must be retained at every level. G2/G3 are pointwise
-    MLPs; their stride is not a temporal pooling window. All levels have the same
-    width. Flat control uses identity G2/G3 but identical horizons and strides.
+    same final observed window must be retained at every level. Each upper map
+    optionally pools a causal window of lower states on that lower level's grid.
+    Only states with complete support exist; no boundary padding is introduced.
+    All levels have the same width. Pointwise behavior is the default baseline.
     """
 
     CHECKPOINT_KEY = "hierarchical_wavjepa"
@@ -63,6 +65,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "localereg_fixed_shape_kmeans": False,
         "readout_mode": "legacy",
         "regularization_scope": "per_level",
+        "aggregation_windows": [1, 1, 1],
+        "temporal_variance_weight": 0.0,
+        "temporal_std_floor": 0.1,
+        "temporal_variance_epsilon": 1e-4,
     }
 
     def __init__(
@@ -96,6 +102,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         readout_mode: str = "legacy",
         training_metric_interval: int = 1,
         regularization_scope: str = "unique_spaces",
+        aggregation_windows: Sequence[int] = (1, 1, 1),
+        temporal_variance_weight: float = 0.0,
+        temporal_std_floor: float = 0.1,
+        temporal_variance_epsilon: float = 1e-4,
     ) -> None:
         super().__init__()
         if type(training_metric_interval) is not int or training_metric_interval < 1:
@@ -147,8 +157,29 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("state_strides must start at 1 and be nondecreasing")
         if any(high % low for low, high in zip(state_strides[:-1], state_strides[1:])):
             raise ValueError("state_strides must be nested integer multiples of the prior level")
+        aggregation_windows = tuple(aggregation_windows)
+        if (
+            len(aggregation_windows) != 3
+            or any(type(window) is not int or window < 1 for window in aggregation_windows)
+            or aggregation_windows[0] != 1
+        ):
+            raise ValueError(
+                "aggregation_windows must contain three positive integers starting at 1"
+            )
+        support_windows = [1]
+        for window, stride in zip(aggregation_windows[1:], state_strides[:-1], strict=True):
+            support_windows.append(support_windows[-1] + (window - 1) * stride)
+        if max(support_windows) > context_windows:
+            raise ValueError("every aggregation level must have complete support in the context")
         if type(hierarchy) is not bool:
             raise ValueError("hierarchy must be boolean")
+        for name, value in (
+            ("temporal_variance_weight", temporal_variance_weight),
+            ("temporal_std_floor", temporal_std_floor),
+            ("temporal_variance_epsilon", temporal_variance_epsilon),
+        ):
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
         if type(eval_seed) is not int or not 0 <= eval_seed < 2**32:
             raise ValueError("eval_seed must be an integer in [0, 2**32)")
         prediction_weights = tuple(float(w) for w in prediction_weights)
@@ -156,13 +187,32 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("prediction_weights must have three entries")
         if any(
             not math.isfinite(w) or w < 0
-            for w in (*prediction_weights, masked_weight, regularization_weight)
+            for w in (
+                *prediction_weights,
+                masked_weight,
+                regularization_weight,
+                temporal_variance_weight,
+            )
         ):
             raise ValueError("loss weights must be finite and nonnegative")
         if not any(prediction_weights) and masked_weight <= 0:
             raise ValueError("at least one prediction objective must be active")
         if hierarchy and any(prediction_weights[1:]) and regularization_weight <= 0:
             raise ValueError("learned upper-level targets require positive regularization_weight")
+        if not math.isfinite(temporal_variance_epsilon) or temporal_variance_epsilon <= 0:
+            raise ValueError("temporal_variance_epsilon must be finite and positive")
+        if not math.isfinite(temporal_std_floor) or temporal_std_floor <= math.sqrt(
+            temporal_variance_epsilon
+        ):
+            raise ValueError("temporal_std_floor must be finite and exceed sqrt(epsilon)")
+        if temporal_variance_weight > 0 and (not hierarchy or not all(prediction_weights[1:])):
+            raise ValueError("temporal variance requires learned upper-level prediction spaces")
+        if temporal_variance_weight > 0 and any(
+            context_windows - support + 1 < 2 for support in support_windows[1:]
+        ):
+            raise ValueError(
+                "temporal variance requires at least two dense valid states per upper level"
+            )
         if not math.isfinite(ema_decay) or not 0 <= ema_decay < 1:
             raise ValueError("ema_decay must be in [0,1)")
         if lr_schedule not in {"constant", "cosine"}:
@@ -184,6 +234,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         self.context_windows = context_windows
         self.horizons = horizons
         self.state_strides = state_strides
+        self.aggregation_windows = aggregation_windows
+        self._level_support_windows = tuple(support_windows)
+        self.temporal_variance_weight = float(temporal_variance_weight)
+        self.temporal_std_floor = float(temporal_std_floor)
+        self.temporal_variance_epsilon = float(temporal_variance_epsilon)
         self.window_samples = backbone.window_samples
         self.sample_windows = context_windows + max(horizons)
         self.required_samples = self.sample_windows * self.window_samples
@@ -226,6 +281,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "context_windows": context_windows,
             "horizons": list(horizons),
             "state_strides": list(state_strides),
+            "aggregation_windows": list(aggregation_windows),
+            "temporal_variance_weight": self.temporal_variance_weight,
+            "temporal_std_floor": self.temporal_std_floor,
+            "temporal_variance_epsilon": self.temporal_variance_epsilon,
             "hierarchy": hierarchy,
             "hidden_dim": hidden_dim,
             "predictor_layers": predictor_layers,
@@ -309,6 +368,75 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             result.append(abstract(result[-1][:, :: current // previous]))
         return result
 
+    @property
+    def level_support_windows(self) -> tuple[int, ...]:
+        """Span of low audio windows needed by each completed upper state."""
+        return self._level_support_windows
+
+    def level_positions(
+        self, window_count: int, *, subsample: bool = False, device: Any = None
+    ) -> list[Tensor]:
+        """Physical low-window endpoints for the valid states returned by encode."""
+        if type(window_count) is not int or window_count < 0:
+            raise ValueError("window_count must be a nonnegative integer")
+        positions = []
+        for support, stride in zip(self.level_support_windows, self.state_strides, strict=True):
+            endpoints = torch.arange(min(support - 1, window_count), window_count, device=device)
+            positions.append(
+                endpoints[endpoints.remainder(stride) == 0] if subsample else endpoints
+            )
+        return positions
+
+    def _subsample_levels(self, levels: list[Tensor], window_count: int) -> list[Tensor]:
+        return [
+            level[:, positions - support + 1]
+            for level, positions, support in zip(
+                levels,
+                self.level_positions(window_count, subsample=True, device=levels[0].device),
+                self.level_support_windows,
+                strict=True,
+            )
+        ]
+
+    def levels_from_low(
+        self, low: Tensor, *, teacher: bool = False, subsample: bool = False
+    ) -> list[Tensor]:
+        """Compose valid causal upper states without padding or future input.
+
+        Upper windows sample the previous dense stream at its cumulative stride.
+        For strides [1,2,4] and aggregation [1,2,2], G2 sees low[t-1:t+1]
+        and G3 sees medium[t-2] and medium[t], covering four low windows.
+        Dense output includes every valid endpoint, even between training-grid
+        endpoints; short inputs return empty upper states, not padded features.
+        """
+        if low.ndim != 3:
+            raise ValueError("low states must have shape [batch, time, feature]")
+        abstractions = self.teacher_abstractions if teacher else self.abstractions
+        if self.aggregation_windows == (1, 1, 1):
+            # Preserve the baseline's original operation ordering and numerics.
+            return self._levels(low, abstractions, self.state_strides if subsample else (1, 1, 1))
+        result = [low]
+        for abstract, window, stride in zip(
+            abstractions, self.aggregation_windows[1:], self.state_strides[:-1], strict=True
+        ):
+            previous = result[-1]
+            offset = (window - 1) * stride
+            count = max(0, previous.shape[1] - offset)
+            if count == 0:
+                pooled = previous[:, :0]
+            elif window == 1:
+                pooled = previous
+            else:
+                pooled = torch.stack(
+                    [
+                        previous[:, offset - j * stride : offset - j * stride + count]
+                        for j in range(window)
+                    ],
+                    dim=0,
+                ).mean(dim=0)
+            result.append(abstract(pooled))
+        return self._subsample_levels(result, low.shape[1]) if subsample else result
+
     def encode(self, waveform: Tensor, *, subsample: bool = False) -> list[Tensor]:
         """Differentiable contextual window embeddings, not generated audio.
 
@@ -316,32 +444,34 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         become available only at its end, despite the backbone's finer token grid.
         Use eval() and torch.no_grad() explicitly for downstream feature extraction.
 
-        The default retains dense embeddings for the existing inference API.
-        subsample=True returns each level on its training-time temporal grid:
-        level l has floor((window_count - 1) / state_strides[l]) + 1 states.
+        The default returns dense valid embeddings. With temporal aggregation,
+        each level omits its incomplete prefix. subsample=True additionally keeps
+        endpoints divisible by that level's cumulative state stride.
         """
-        return self._levels(
+        return self.levels_from_low(
             self.backbone.encode_windows(self._windows(waveform), readout_mode=self.readout_mode),
-            self.abstractions,
-            self.state_strides if subsample else (1, 1, 1),
+            subsample=subsample,
         )
 
     @torch.no_grad()
     def encode_targets(self, waveform: Tensor, *, subsample: bool = False) -> list[Tensor]:
         """EMA states on a dense or successively subsampled temporal grid."""
-        return self._levels(
+        return self.levels_from_low(
             self.backbone.encode_teacher_windows(self._windows(waveform)),
-            self.teacher_abstractions,
-            self.state_strides if subsample else (1, 1, 1),
+            teacher=True,
+            subsample=subsample,
         )
 
     def _predict_levels(self, levels: list[Tensor]) -> list[Tensor]:
         """Consume already-subsampled levels with their original window positions."""
         predictions = []
-        for level, stride, predictor, weight in zip(
-            levels, self.state_strides, self.predictors, self.prediction_weights, strict=True
+        for level, positions, predictor, weight in zip(
+            levels,
+            self.level_positions(self.context_windows, subsample=True, device=levels[0].device),
+            self.predictors,
+            self.prediction_weights,
+            strict=True,
         ):
-            positions = torch.arange(0, self.context_windows, stride, device=level.device)
             predictions.append(predictor(level, positions) if weight > 0 else level[:, -1] * 0)
         return predictions
 
@@ -385,42 +515,79 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             masked, teacher_windows = self.backbone.masked_loss_with_targets(windows, seed=seed)
         else:
             masked = zero
-        terms, reg_terms = [zero] * 3, [zero] * 3
-        levels, predictions, targets = [], [], []
+        terms, reg_terms, temporal_terms = [zero] * 3, [zero] * 3, [zero] * 3
+        levels, dense_levels, predictions, targets = [], [], [], []
         regularization_stats = []
         teacher_origins = []
-        if any(self.prediction_weights) or self.regularization_weight:
+        if (
+            any(self.prediction_weights)
+            or self.regularization_weight
+            or self.temporal_variance_weight
+        ):
             # Encode ONLY the prefix for the online forecasting path. The separate
             # masked anchor may use all windows, but shares no contextual activations.
             prefix = waveform[:, : self.context_windows * self.window_samples]
-            levels = self.encode(prefix, subsample=True)
+            if self.aggregation_windows != (1, 1, 1) or self.temporal_variance_weight:
+                dense_levels = self.encode(prefix)
+                levels = self._subsample_levels(dense_levels, self.context_windows)
+            else:
+                # Retain baseline floating-point operation order exactly.
+                levels = self.encode(prefix, subsample=True)
+                # Evaluation variance compares the same dense prefix across
+                # variants. Reuse low states; this diagnostic-only branch never
+                # changes predictions, regularization, or the training graph.
+                dense_levels = self.levels_from_low(levels[0]) if diagnostics else levels
             predictions = self._predict_levels(levels)
             if any(self.prediction_weights):
                 indices = [self.context_windows - 1 + horizon for horizon in self.horizons]
                 with torch.no_grad():
                     # The masked anchor already evaluated the dense teacher. Reuse
                     # only detached targets; no future activations enter the student.
-                    # Without the anchor, evaluate only the three requested windows.
-                    selected = (
-                        teacher_windows[:, indices]
-                        if teacher_windows is not None
-                        else self.backbone.encode_teacher_windows(windows[:, indices])
-                    )
-                    target_levels = self._levels(selected, self.teacher_abstractions)
-                    targets = [values[:, i] for i, values in enumerate(target_levels)]
-                    if diagnostics:
-                        origin = self.context_windows - 1
-                        origin_low = (
-                            teacher_windows[:, origin : origin + 1]
+                    # Aggregated targets need their full causal support. The
+                    # no-anchor path encodes all windows once and shares them
+                    # with origin diagnostics. The pointwise baseline keeps its
+                    # original three-window optimization and numerical order.
+                    if self.aggregation_windows != (1, 1, 1):
+                        dense_teacher = (
+                            teacher_windows
                             if teacher_windows is not None
-                            else self.backbone.encode_teacher_windows(
-                                windows[:, origin : origin + 1]
-                            )
+                            else self.backbone.encode_teacher_windows(windows)
                         )
-                        teacher_origins = [
-                            values[:, 0]
-                            for values in self._levels(origin_low, self.teacher_abstractions)
+                        target_levels = self.levels_from_low(dense_teacher, teacher=True)
+                        targets = [
+                            values[:, endpoint - support + 1]
+                            for values, endpoint, support in zip(
+                                target_levels, indices, self.level_support_windows, strict=True
+                            )
                         ]
+                        if diagnostics:
+                            teacher_origins = [
+                                values[:, self.context_windows - support]
+                                for values, support in zip(
+                                    target_levels, self.level_support_windows, strict=True
+                                )
+                            ]
+                    else:
+                        selected = (
+                            teacher_windows[:, indices]
+                            if teacher_windows is not None
+                            else self.backbone.encode_teacher_windows(windows[:, indices])
+                        )
+                        target_levels = self._levels(selected, self.teacher_abstractions)
+                        targets = [values[:, i] for i, values in enumerate(target_levels)]
+                        if diagnostics:
+                            origin = self.context_windows - 1
+                            origin_low = (
+                                teacher_windows[:, origin : origin + 1]
+                                if teacher_windows is not None
+                                else self.backbone.encode_teacher_windows(
+                                    windows[:, origin : origin + 1]
+                                )
+                            )
+                            teacher_origins = [
+                                values[:, 0]
+                                for values in self._levels(origin_low, self.teacher_abstractions)
+                            ]
                 terms = [
                     F.mse_loss(prediction.float(), target.float()) if weight > 0 else zero
                     for prediction, target, weight in zip(
@@ -452,6 +619,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                             self.regularization_scope == "unique_spaces"
                             and not self.config["hierarchy"]
                             and index > 0
+                            and self.aggregation_windows[index] == 1
                         ):
                             reg_terms.append(zero)
                             regularization_stats.append({})
@@ -477,18 +645,30 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                         regularization_stats.append(
                             dict(getattr(self.regularizer, "last_stats", {}))
                         )
+            if self.temporal_variance_weight:
+                temporal_terms = [zero] + [
+                    temporal_variance_floor(
+                        level,
+                        std_floor=self.temporal_std_floor,
+                        epsilon=self.temporal_variance_epsilon,
+                    )
+                    for level in dense_levels[1:]
+                ]
         prediction_loss = sum(
             (weight * loss for weight, loss in zip(self.prediction_weights, terms, strict=True)),
             start=zero,
         )
         regularization_loss = sum(reg_terms, start=zero)
+        temporal_variance_loss = sum(temporal_terms, start=zero)
         loss = (
             self.masked_weight * masked
             + prediction_loss
             + self.regularization_weight * regularization_loss
         )
+        if self.temporal_variance_weight:
+            loss = loss + self.temporal_variance_weight * temporal_variance_loss
         if not all_ranks_true(
-            torch.isfinite(torch.stack([loss, masked, *terms, *reg_terms])).all(),
+            torch.isfinite(torch.stack([loss, masked, *terms, *reg_terms, *temporal_terms])).all(),
             synchronize=distributed_training,
         ):
             raise FloatingPointError("non-finite upstream WavJEPA dynamics loss")
@@ -497,10 +677,13 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "masked_loss": masked,
             "prediction_loss": prediction_loss,
             "regularization_loss": regularization_loss,
+            "temporal_variance_loss": temporal_variance_loss,
             "prediction_terms": terms,
             "regularization_terms": reg_terms,
+            "temporal_variance_terms": temporal_terms,
             "regularization_stats": regularization_stats,
             "levels": levels,
+            "dense_levels": dense_levels,
             "predictions": predictions,
             "targets": targets,
             "teacher_origins": teacher_origins,
@@ -515,7 +698,12 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         measurements reveal temporal collapse; they do not prevent or certify it.
         """
         levels = result["levels"]
-        stats = [recording_variance(level) for level in levels]
+        stats = [recording_variance(level) for level in result.get("dense_levels", levels)]
+        for stat, level, dense in zip(
+            stats, levels, result.get("dense_levels", levels), strict=True
+        ):
+            stat["variance_context_states"] = level.new_tensor(dense.shape[1])
+            stat["predictor_context_states"] = level.new_tensor(level.shape[1])
         if not result["teacher_origins"]:
             return stats
         shifted_predictions = self._predict_levels([level.roll(1, dims=1) for level in levels])
@@ -552,13 +740,24 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             batch_size=len(batch["waveform"]),
             sync_dist=True,
         )
-        for key in ("loss", "masked_loss", "prediction_loss", "regularization_loss"):
+        for key in (
+            "loss",
+            "masked_loss",
+            "prediction_loss",
+            "regularization_loss",
+            "temporal_variance_loss",
+        ):
             self.log(f"{stage}/{key}", result[key], prog_bar=key == "loss", **kwargs)
         for i, (term, penalty) in enumerate(
             zip(result["prediction_terms"], result["regularization_terms"], strict=True)
         ):
             self.log(f"{stage}/level_{i}/prediction_loss", term, **kwargs)
             self.log(f"{stage}/level_{i}/{self.regularizer_kind}", penalty, **kwargs)
+            self.log(
+                f"{stage}/level_{i}/temporal_variance_loss",
+                result["temporal_variance_terms"][i],
+                **kwargs,
+            )
         for i, stats in enumerate(result["regularization_stats"]):
             for name, value in stats.items():
                 self.log(f"{stage}/level_{i}/localereg_{name}", value, **kwargs)

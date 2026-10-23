@@ -40,6 +40,13 @@ class HEARModel(nn.Module):
         self.eval()
 
     @property
+    def support_windows(self) -> int:
+        """Span, in low windows, of the selected dense state's causal support."""
+        if self.representation == "backbone":
+            return 1
+        return self.encoder.level_support_windows[REPRESENTATIONS.index(self.representation)]
+
+    @property
     def device(self) -> torch.device:
         return next(self.encoder.parameters()).device
 
@@ -75,8 +82,29 @@ def _validate_audio(audio: Tensor, model: HEARModel) -> None:
         raise ValueError("HEAR extraction currently supports CPU/CUDA")
 
 
+def _level_readouts(low: Tensor, model: HEARModel) -> Tensor:
+    """Aggregate CPU-cached low states with bounded accelerator lookback.
+
+    Every chunk includes the full causal support of its first output. The low
+    state cache is on CPU, so window batching never resets an upper state or
+    copies the entire recording onto the accelerator. Only evaluation clips
+    shorter than the selected support repeat their first state on the left.
+    """
+    support = model.support_windows
+    index = REPRESENTATIONS.index(model.representation)
+    if len(low) < support:
+        low = torch.cat([low[:1].expand(support - len(low), -1), low])
+    outputs = []
+    for first in range(support - 1, len(low), model.window_batch_size):
+        stop = min(first + model.window_batch_size, len(low))
+        context = low[first - support + 1 : stop][None].to(model.device)
+        values = model.encoder.levels_from_low(context)[index][0]
+        outputs.append(values.float().cpu())
+    return torch.cat(outputs)
+
+
 def _window_readouts(audio: Tensor, model: HEARModel, starts: list[int]) -> Tensor:
-    """Return CPU embeddings, never put the whole recording on the accelerator."""
+    """Return valid dense CPU states using complete past-window support."""
     size = model.encoder.window_samples
     recordings = []
     for recording in audio:
@@ -98,10 +126,12 @@ def _window_readouts(audio: Tensor, model: HEARModel, starts: list[int]) -> Tens
                 low = model.encoder.backbone.encode_windows(
                     windows[:, None], readout_mode=model.encoder.readout_mode
                 )
-                levels = model.encoder._levels(low, model.encoder.abstractions)
-                values = levels[REPRESENTATIONS.index(model.representation)][:, 0]
+                values = low[:, 0]
             batches.append(values.float().cpu())
-        recordings.append(torch.cat(batches))
+        values = torch.cat(batches)
+        recordings.append(
+            values if model.representation == "backbone" else _level_readouts(values, model)
+        )
     return torch.stack(recordings)
 
 
@@ -139,11 +169,13 @@ def _token_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, Tensor]:
 def get_timestamp_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, Tensor]:
     """Return float32 CPU features and centered millisecond timestamps.
 
-    Window spaces use complete nonoverlapping windows on the *dense* grid at
-    every level; no upper-level interpolation is performed. A trailing partial
-    window is omitted, except that a clip shorter than one window is right-padded
-    once and represented at its real center. Backbone mode keeps valid tokens on
-    the native frontend grid, using minimally overlapping context windows.
+    Window spaces use the *dense valid* grid, centered over each state's full
+    temporal support; no upper-level interpolation is performed. A trailing
+    partial waveform window is omitted unless the clip is shorter than one
+    window, when it is right-zero-padded. Clips with fewer low states than the
+    selected upper support repeat the first low state on the left and return one
+    state at the real clip center. This fallback is evaluation-only. Backbone
+    mode retains valid tokens on its native frontend grid.
     """
     _validate_audio(audio, model)
     if model.representation == "backbone":
@@ -152,16 +184,26 @@ def get_timestamp_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, T
     complete = audio.shape[1] // size
     starts = [index * size for index in range(max(1, complete))]
     values = _window_readouts(audio, model, starts)
-    support = min(size, audio.shape[1])
-    times = (torch.tensor(starts, dtype=torch.float32) + (support - 1) / 2) * (
-        1000.0 / model.sample_rate
-    )
+    support = model.support_windows
+    if len(starts) < support or complete == 0:
+        times = torch.tensor([(audio.shape[1] - 1) * 500.0 / model.sample_rate])
+    else:
+        # Dense state i spans [i, i + support) low windows, even though its
+        # training-grid identity is the physical endpoint i + support - 1.
+        times = (torch.arange(len(starts) - support + 1) * size + (support * size - 1) / 2) * (
+            1000.0 / model.sample_rate
+        )
     return values, times.expand(audio.shape[0], -1).clone()
 
 
 @torch.inference_mode()
 def get_scene_embeddings(audio: Tensor, model: HEARModel) -> Tensor:
-    """Pool all real audio; weight a right-padded last window by real duration."""
+    """Mean valid states, weighting each by its endpoint window's real duration.
+
+    The final partial waveform window is right-zero-padded. For upper states,
+    endpoint duration weights avoid repeatedly counting overlapping support as
+    additional duration; an evaluation-only left repeat handles short clips.
+    """
     _validate_audio(audio, model)
     if model.representation == "backbone":
         values, _ = _token_embeddings(audio, model)
@@ -169,7 +211,8 @@ def get_scene_embeddings(audio: Tensor, model: HEARModel) -> Tensor:
     size = model.encoder.window_samples
     starts = list(range(0, audio.shape[1], size))
     values = _window_readouts(audio, model, starts)
+    endpoint_starts = starts[model.support_windows - 1 :] or starts[-1:]
     weights = torch.tensor(
-        [min(size, audio.shape[1] - start) for start in starts], dtype=torch.float32
+        [min(size, audio.shape[1] - start) for start in endpoint_starts], dtype=torch.float32
     )
     return (values * weights[None, :, None]).sum(dim=1) / weights.sum()

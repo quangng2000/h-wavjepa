@@ -49,8 +49,12 @@ def test_resume_skips_initialization_download_and_file(make_config, monkeypatch)
 
 
 @pytest.fixture
-def dynamics_export_fixture(make_config, tmp_path):
+def dynamics_export_fixture(make_config, tmp_path, request):
+    from omegaconf import OmegaConf
+
     cfg = make_config(["experiment=upstream_smoke"])
+    if getattr(request, "param", None) == "temporal":
+        OmegaConf.update(cfg.model, "aggregation_windows", [1, 2, 2], force_add=True)
     model = instantiate(cfg.model).eval()
     checkpoint = {"state_dict": model.state_dict()}
     model.on_save_checkpoint(checkpoint)
@@ -111,3 +115,33 @@ def test_checkpoint_family_is_explicit(dynamics_export_fixture, tmp_path):
     path, manifest, _, _ = dynamics_export_fixture
     with pytest.raises(ValueError, match="missing H-WavJEPA"):
         extract_embeddings(path, manifest, tmp_path / "embeddings", num_samples=4608)
+
+
+@pytest.mark.parametrize("dynamics_export_fixture", ["temporal"], indirect=True)
+def test_temporal_export_preserves_whole_crop_context_and_training_endpoints(
+    dynamics_export_fixture, tmp_path
+):
+    path, manifest, model, waveform = dynamics_export_fixture
+    output = tmp_path / "temporal-embeddings"
+    result = extract_embeddings(path, manifest, output, num_samples=4608, model_family="dynamics")
+    assert result["aggregation_windows"] == [1, 2, 2]
+    assert result["level_support_windows"] == [1, 2, 4]
+    assert result["level_endpoints"] == [list(range(9)), [2, 4, 6, 8], [4, 8]]
+    assert result["state_padding"].startswith("none")
+    shard = torch.load(output / "batch-000000.pt", weights_only=True)
+    with torch.inference_mode():
+        expected = model.encode(waveform, subsample=True)
+    for level, exported in zip(expected, shard["levels"], strict=True):
+        torch.testing.assert_close(exported, level.mean(dim=1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dynamics_export_fixture", ["temporal"], indirect=True)
+def test_temporal_export_rejects_crop_without_complete_training_grid(
+    dynamics_export_fixture, tmp_path
+):
+    path, manifest, _, _ = dynamics_export_fixture
+    with pytest.raises(ValueError, match="complete state at every training stride"):
+        extract_embeddings(
+            path, manifest, tmp_path / "too-short", num_samples=2048, model_family="dynamics"
+        )
+    assert not (tmp_path / "too-short").exists()

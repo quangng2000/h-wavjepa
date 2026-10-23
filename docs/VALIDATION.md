@@ -215,9 +215,27 @@ compatibility fix for chosen-epoch postprocessing. The other guarded patch makes
 TensorFlow optional for PyTorch-only packaging. These generated-data scores are
 integration evidence only; they are not reported as model-quality results.
 
-No real benchmark or model-quality result is claimed. Distributed and
-mixed-precision evidence comes from generated audio on CPU and the short H100
-smoke above. The new abstractions and forecasting heads still require training
-and controlled downstream comparisons. The hierarchy remains the pointwise
-baseline: strides change the sampled state grid, and the upper MLPs do not pool
-adjacent windows.
+## Temporal aggregation and frozen-readout checks
+
+The optional [temporal model](TEMPORAL_AGGREGATION.md) has CPU coverage for valid
+causal support, target-window alignment, future-audio isolation, within-recording
+variance pressure and old pointwise checkpoint compatibility. The generated-audio
+Hydra preset completed one epoch with validation. Two-process CPU FP32 and BF16
+tests completed training and checkpoint resume; a separate DDP test compares
+gradients with a single global batch, including an independently computed temporal
+penalty. HEAR tests compare chunked extraction with full-history encoding and
+cover support-center timestamps, partial tails and short-clip padding.
+
+The complete local suite passed 768 tests with three environment-dependent skips
+before the frozen-readout probe and extra temporal BF16 variants were added. The
+additional run passed 28 probe/DDP checks, including 24 new probe tests and the
+new temporal CPU BF16 train/resume test; its two CUDA variants were skipped on
+this CPU host. The probe tests cover whole-cohort moment merging, batch-partition
+invariance, recording deduplication, official-weight verification and fixed crop
+provenance. These test fixtures do not measure the released model on AudioSet.
+
+No real benchmark or model-quality result is claimed. The H100 evidence above
+applies to the pointwise model. Temporal aggregation has not been validated on
+H100 hardware, and its throughput is unmeasured. The abstractions, forecasting
+heads and temporal floor still require controlled training and downstream
+comparisons; the pointwise presets remain available unchanged.

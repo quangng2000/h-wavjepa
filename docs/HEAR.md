@@ -67,6 +67,8 @@ identical features and must not be reported as three distinct learned spaces.
 
 ## Representation and timing
 
+For pointwise checkpoints:
+
 | `--representation` | Scene feature | Timestamp feature |
 | --- | --- | --- |
 | `low` | Duration-weighted mean of window states | One state per completed window |
@@ -74,7 +76,7 @@ identical features and must not be reported as three distinct learned spaces.
 | `high` | Same pooling after learned G2 then G3 | Dense G3 states on the same window grid |
 | `backbone` | Mean of contextual frontend-grid tokens | Actual backbone tokens on their native grid |
 
-Every level has the backbone's feature width. Dense upper-level readouts apply
+Every level has the backbone's feature width. For pointwise checkpoints, dense upper-level readouts apply
 the learned pointwise maps to every window; they do not upsample sparse states.
 This evaluation grid differs from the default training state strides `[1, 2, 4]`;
 both are recorded in the export manifest.
@@ -88,6 +90,27 @@ slightly overlapping context windows maintain a continuous token grid. With the
 default frontend the token hop is 10 ms. This is a token location, **not** a
 10 ms context window or a streaming availability guarantee: contextual attention
 and normalization see the complete independently encoded audio window.
+
+For [temporal checkpoints](TEMPORAL_AGGREGATION.md), medium/high states aggregate
+past low states using the saved geometry. Only complete supports are emitted on
+the dense grid, and timestamp locations are the centers of those full supports.
+With the default 1/2/4-window geometry, a nine-window clip has 9/8/6 dense states.
+Feature extraction retains past low states across window batches, so changing
+`window_batch_size` does not reset the temporal context. Low states are cached on
+CPU; accelerator chunks include only the needed lookback and current outputs.
+
+When a clip has fewer windows than the selected upper support, HEAR repeats its
+first low state on the left and emits one state at the real clip center. This is
+an explicit **evaluation-only fallback**; training and ordinary `encode` never
+pad state history. Timestamp extraction retains its existing rule of omitting a
+partial waveform tail unless the clip is shorter than one base window. Scene
+extraction retains that tail, pools valid dense states and weights them by each
+endpoint window's real duration. Overlapping supports are not individually
+duration-weighted. Report this convention with scene scores.
+
+Export metadata includes `aggregation_windows`, `level_support_windows`,
+`selected_support_windows`, `scene_pooling`, and `short_clip_state_padding`.
+Identity upper maps with temporal pooling are not reported as duplicate levels.
 
 Scene readouts retain a trailing partial window, right-pad it with zeros, and
 weight it by its real duration. Coarse timestamp readouts omit a partial trailing

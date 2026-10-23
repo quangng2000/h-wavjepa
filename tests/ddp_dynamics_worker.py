@@ -14,7 +14,7 @@ from src.train import train
 
 
 def main():
-    root, dataset, destination, accelerator, precision = map(str, sys.argv[1:])
+    root, dataset, destination, accelerator, precision, variant = map(str, sys.argv[1:])
     rank = int(os.environ["RANK"])
     destination = Path(destination)
     for phase, max_steps in (("initial", 2), ("resumed", 4)):
@@ -50,6 +50,11 @@ def main():
         cfg.model.backbone.config.average_top_k_layers = 2
         cfg.model.backbone.config.use_gradient_checkpointing = True
         cfg.model.readout_mode = "normalized_top_k"
+        if variant == "temporal":
+            cfg.model.aggregation_windows = [1, 2, 2]
+            cfg.model.temporal_variance_weight = 0.1
+            cfg.model.temporal_std_floor = 0.1
+            cfg.model.temporal_variance_epsilon = 1e-4
         cfg.model.localereg_clusters = 2
         cfg.model.localereg_min_cluster_size = 2
         cfg.model.localereg_n_quad = 32
@@ -79,6 +84,11 @@ def main():
         assert model.ema_updates.item() == max_steps
         assert model._resolved_training_schedule["total_steps"] == 4
         assert model.readout_mode == "normalized_top_k"
+        if variant == "temporal":
+            assert model.config["aggregation_windows"] == [1, 2, 2]
+            assert model.config["temporal_variance_weight"] == 0.1
+            assert torch.isfinite(metrics["train/temporal_variance_loss"])
+            assert torch.isfinite(metrics["val/temporal_variance_loss"])
         assert model.backbone.model.encoder is not model.backbone.model.teacher_encoder
         assert torch.isfinite(metrics["train/loss"])
         assert torch.isfinite(metrics["val/loss"])
@@ -103,6 +113,7 @@ def main():
             "sampler_epoch": sampler.epoch,
             "train_loss": float(metrics["train/loss"]),
             "val_loss": float(metrics["val/loss"]),
+            "variant": variant,
         }
         (output / f"rank-{rank}.json").write_text(json.dumps(report, indent=2))
 

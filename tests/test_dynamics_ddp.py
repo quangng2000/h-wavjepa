@@ -40,13 +40,25 @@ def ddp_wav_dataset(tmp_path_factory):
 @pytest.mark.integration
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="Requires PyTorch Gloo backend")
 @pytest.mark.parametrize(
-    ("accelerator", "precision"),
+    ("accelerator", "precision", "variant"),
     [
-        ("cpu", "32-true"),
-        ("cpu", "bf16-mixed"),
+        ("cpu", "32-true", "pointwise"),
+        ("cpu", "bf16-mixed", "pointwise"),
+        ("cpu", "32-true", "temporal"),
+        ("cpu", "bf16-mixed", "temporal"),
         pytest.param(
             "cuda",
             "bf16-mixed",
+            "pointwise",
+            marks=pytest.mark.skipif(
+                torch.cuda.device_count() < 2 or not torch.cuda.is_bf16_supported(),
+                reason="Requires two CUDA devices with BF16 support",
+            ),
+        ),
+        pytest.param(
+            "cuda",
+            "bf16-mixed",
+            "temporal",
             marks=pytest.mark.skipif(
                 torch.cuda.device_count() < 2 or not torch.cuda.is_bf16_supported(),
                 reason="Requires two CUDA devices with BF16 support",
@@ -55,7 +67,7 @@ def ddp_wav_dataset(tmp_path_factory):
     ],
 )
 def test_two_process_wav_training_checkpoint_resume_and_ema(
-    ddp_wav_dataset, tmp_path, accelerator, precision
+    ddp_wav_dataset, tmp_path, accelerator, precision, variant
 ):
     root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
@@ -90,6 +102,7 @@ def test_two_process_wav_training_checkpoint_resume_and_ema(
             str(tmp_path),
             accelerator,
             precision,
+            variant,
         ],
         cwd=root,
         env=env,
@@ -116,6 +129,7 @@ def test_two_process_wav_training_checkpoint_resume_and_ema(
         assert reports[0]["state_sha256"] == reports[1]["state_sha256"]
         assert all(report["global_step"] == expected_steps for report in reports)
         assert all(report["ema_updates"] == expected_steps for report in reports)
+        assert all(report["variant"] == variant for report in reports)
         indices = [{index[0] for index in report["sample_indices"]} for report in reports]
         assert indices[0].isdisjoint(indices[1])
         assert indices[0] | indices[1] == set(range(16))
@@ -125,6 +139,10 @@ def test_two_process_wav_training_checkpoint_resume_and_ema(
         )
         assert checkpoint["global_step"] == expected_steps
         assert checkpoint["state_dict"]["ema_updates"].item() == expected_steps
+        if variant == "temporal":
+            config = checkpoint["hierarchical_wavjepa"]["dynamics"]
+            assert config["aggregation_windows"] == [1, 2, 2]
+            assert config["temporal_variance_weight"] == 0.1
         run = json.loads((output / "run.json").read_text())
         assert run["status"] == "completed"
         assert run["global_step"] == expected_steps

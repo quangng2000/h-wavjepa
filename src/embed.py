@@ -53,6 +53,11 @@ def extract_embeddings(
     )
     if type(num_samples) is not int or num_samples < divisor or num_samples % divisor:
         raise ValueError(f"num_samples must be a positive multiple of {divisor}")
+    if model_family == "dynamics" and any(
+        len(positions) == 0
+        for positions in model.level_positions(num_samples // divisor, subsample=True)
+    ):
+        raise ValueError("num_samples does not contain a complete state at every training stride")
     entries = _manifest_entries(manifest)
     dataset = WAVManifestDataset(
         entries,
@@ -79,6 +84,18 @@ def extract_embeddings(
         "examples": len(dataset),
         "shards": 0,
     }
+    if model_family == "dynamics":
+        record.update(
+            aggregation_windows=list(model.aggregation_windows),
+            level_support_windows=list(model.level_support_windows),
+            training_state_strides=list(model.state_strides),
+            temporal_context="whole manifest crop; never split or reset between internal windows",
+            state_padding="none; only valid states at training-grid endpoints",
+            level_endpoints=[
+                positions.tolist()
+                for positions in model.level_positions(num_samples // divisor, subsample=True)
+            ],
+        )
     atomic_json(directory / "metadata.json", record)
     offset = 0
     try:

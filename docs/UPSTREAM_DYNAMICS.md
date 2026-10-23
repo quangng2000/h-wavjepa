@@ -6,6 +6,11 @@ convolutional frontend, context Transformer, masked predictor, or masked loss.
 The source subset, hashes, compatibility edits and licenses are recorded in
 [`src/vendor/wavjepa/NOTICE.md`](../src/vendor/wavjepa/NOTICE.md).
 
+The pointwise baseline is described below. The separately configured
+[temporal aggregation version](TEMPORAL_AGGREGATION.md) adds causal windows before
+the upper maps and optional within-recording variance pressure; existing presets
+retain their original pointwise objective.
+
 ## Research references and adaptation boundary
 
 | Mechanism | Evidence | This implementation |
@@ -72,7 +77,8 @@ this field retain their `legacy` readout behavior; changing readout semantics on
 resume is rejected. Mean pooling can discard within-window details and is not
 evidence of learned semantic abstraction. The original masked objective still
 trains finer token-level features. Temporal aggregation over multiple completed
-windows remains a separate experiment; the pointwise baseline is preserved.
+windows is available as a [separate experiment](TEMPORAL_AGGREGATION.md); the
+pointwise baseline is preserved.
 
 The pinned core applies four-dimensional `instance_norm` to `[layers, batch,
 features, tokens]`, normalizing jointly over features and tokens for each layer
@@ -145,24 +151,28 @@ Use the same initialization override and data index for both arms. Equal update
 and example budgets do not imply equal FLOPs; report measured compute separately.
 For the flat four-H100 arm, use `experiment=audioset_h100_four model.hierarchy=false`.
 
-Further mechanism claims need **new, separately configured experiments**:
+The [temporal presets](TEMPORAL_AGGREGATION.md) now implement aggregation and a
+per-recording upper-state standard-deviation floor as independent switches.
+Their four-way comparison separates those interventions, but the aggregate arm
+also changes valid state counts and target support. Further mechanism claims need
+**separately configured experiments**:
 
 - Match flat predictor capacity/compute, and compare independent horizon maps
   with the composed G2/G3 maps, to distinguish added capacity from composition.
 - Compare temporal-mean readout with a readout that retains within-window temporal
   structure, matching student and target definitions. Evaluate event timing as
   well as scene tasks, and retain the mean-pool control.
-- Compare pointwise maps with encoders over multiple consecutive low states.
-  Define past-only support and target alignment explicitly; match the flat
-  predictor's available context. Aggregation alone does not exclude recording identity.
+- Compare the implemented mean aggregation with alternative pooling/attention,
+  matching support and predictor context. Aggregation alone does not exclude
+  recording identity; the temporal variance floor can also be satisfied by noise.
 - Ablate upper-target EMA and regularization separately while retaining WavJEPA's
   masked teacher. An online target policy must specify whether targets are detached;
   setting EMA decay to zero is not equivalent to a fully differentiable no-teacher
   objective. The current constructor requires positive regularization for learned
   upper targets, so a zero-penalty cell needs an explicit experimental implementation.
 
-These readout, aggregation and upper-target-policy ablations are not implemented
-presets or validated fixes. [Temporal diagnostics](TEMPORAL_DIAGNOSTICS.md) can
+Readout alternatives, attention pooling and upper-target-policy ablations are not
+implemented presets or validated fixes. [Temporal diagnostics](TEMPORAL_DIAGNOSTICS.md) can
 detect suspicious solutions, but cannot replace downstream evaluation or prevent
 collapse. Hardware smoke tests establish execution, not these research claims.
 

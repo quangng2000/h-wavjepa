@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - audioset
+  - _self_
+
+# New research arm: causal aggregation plus within-recording upper-state pressure.
+# Same nine windows, masked objective, global schedule and initialization recipe.
+tags: [audioset, temporal-aggregation, temporal-variance, localereg, research]
+model:
+  aggregation_windows: [1, 2, 2]
+  temporal_variance_weight: 0.1

@@ -47,6 +47,9 @@ context_windows: 5
 # Context length and audio-window horizons are our adaptation, not paper defaults.
 horizons: [1, 2, 4]
 state_strides: [1, 2, 4]
+# Pointwise baseline. Temporal presets pool causal windows before each upper MLP.
+# [1,2,2] with these strides gives support widths [1,2,4] completed audio windows.
+aggregation_windows: [1, 1, 1]
 hierarchy: true
 # Matching top-k transformations on online/EMA inputs to the upper maps.
 # Old checkpoints without this field retain their original legacy readout.
@@ -57,6 +60,11 @@ predictor_heads: 4
 prediction_weights: [1.0, 1.0, 1.0]
 masked_weight: 1.0
 regularization_weight: 0.1
+# Optional upper-space temporal pressure, independent of the cross-recording loss.
+# These defaults preserve the existing pointwise objective and old checkpoints.
+temporal_variance_weight: 0.0
+temporal_std_floor: 0.1
+temporal_variance_epsilon: 0.0001
 # One penalty per distinct state space: three with hierarchy, low only when flat.
 # Missing fields in older checkpoints preserve their per_level objective.
 regularization_scope: unique_spaces

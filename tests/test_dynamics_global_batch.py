@@ -49,7 +49,12 @@ def _global_batch_worker(rank, rendezvous):
         "gloo", rank=rank, world_size=2, init_method=rendezvous, timeout=timedelta(seconds=45)
     )
     try:
-        for kind, hierarchy in (("sigreg", True), ("localereg", True), ("localereg", False)):
+        for kind, hierarchy, temporal in (
+            ("sigreg", True, False),
+            ("localereg", True, False),
+            ("localereg", False, False),
+            ("sigreg", True, True),
+        ):
             torch.manual_seed(887)
             backbone_config = model_factory().backbone.construction_config()
             backbone_config.update(encoder_layers=2, average_top_k_layers=2)
@@ -61,6 +66,16 @@ def _global_batch_worker(rank, rendezvous):
                 localereg_n_quad=32,
                 hierarchy=hierarchy,
                 readout_mode="normalized_top_k",
+                **(
+                    {
+                        "aggregation_windows": [1, 2, 2],
+                        "temporal_variance_weight": 0.1,
+                        "temporal_std_floor": 0.1,
+                        "temporal_variance_epsilon": 1e-4,
+                    }
+                    if temporal
+                    else {}
+                ),
                 optimizer=partial(torch.optim.SGD, lr=0.03, momentum=0.9),
             ).train()
             assert not any(
@@ -90,6 +105,8 @@ def _global_batch_worker(rank, rendezvous):
                 # Explicit per-level sketch seeds match the distributed estimator;
                 # the normal standalone seeded path uses a different RNG sequence.
                 reference.regularization_weight = 0
+                if temporal:
+                    reference.temporal_variance_weight = 0
                 with patch("torch.distributed.is_initialized", return_value=False):
                     result = reference.compute_loss(audio, seed=seed)
                     selected_levels = result["levels"] if hierarchy else result["levels"][:1]
@@ -100,6 +117,30 @@ def _global_batch_worker(rank, rendezvous):
                         for i, level in enumerate(selected_levels)
                     )
                     expected = result["loss"] + model.regularization_weight * penalty
+                    if temporal:
+                        # Independently construct a local per-recording objective.
+                        # Between-recording offsets must not enlarge the variance
+                        # population: only each recording's dense valid time axis
+                        # contributes. DDP then averages ordinary local means.
+                        prefix = audio[:, : model.context_windows * model.window_samples]
+                        dense = reference.encode(prefix, subsample=False)
+                        temporal_penalty = sum(
+                            (0.1 - (level.float().var(dim=1, unbiased=False) + 1e-4).sqrt())
+                            .relu()
+                            .mean()
+                            for level in dense[1:]
+                        )
+                        assert temporal_penalty > 0
+                        temporal_gradients = torch.autograd.grad(
+                            temporal_penalty,
+                            list(reference.abstractions.parameters()),
+                            retain_graph=True,
+                        )
+                        assert all(
+                            torch.isfinite(gradient).all() for gradient in temporal_gradients
+                        )
+                        assert sum(gradient.abs().sum() for gradient in temporal_gradients) > 0
+                        expected = expected + 0.1 * temporal_penalty
                     expected.backward()
                 torch.testing.assert_close(mean_actual, expected, atol=2e-5, rtol=2e-5)
                 actual_parameters = dict(model.named_parameters())
@@ -113,7 +154,9 @@ def _global_batch_worker(rank, rendezvous):
                             parameter.grad,
                             atol=3e-5,
                             rtol=3e-4,
-                            msg=lambda message, name=name: f"{kind}/{hierarchy}/{name}: {message}",
+                            msg=lambda message, name=name: (
+                                f"{kind}/{hierarchy}/{temporal}/{name}: {message}"
+                            ),
                         )
                 require_finite_gradients(optimizer)
                 optimizer.step()
@@ -125,7 +168,9 @@ def _global_batch_worker(rank, rendezvous):
                         reference.state_dict()[name],
                         atol=1e-5,
                         rtol=1e-4,
-                        msg=lambda message, name=name: f"{kind}/{hierarchy}/{name}: {message}",
+                        msg=lambda message, name=name: (
+                            f"{kind}/{hierarchy}/{temporal}/{name}: {message}"
+                        ),
                     )
             del ddp
 

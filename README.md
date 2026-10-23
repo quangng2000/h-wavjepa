@@ -6,11 +6,11 @@
 
 A research baseline for **learned horizon-specific target spaces** on top of the official [WavJEPA](https://github.com/labhamlet/wavjepa) training core. It uses pointwise upper maps inspired by [H-JEPA](https://github.com/kevinghst/H-JEPA) and [LocaLeReg](docs/LOCALEREG.md). Experiments follow the [Lightning–Hydra template](docs/TEMPLATE.md).
 
-The model retains masked prediction and adds three future predictors. Upper states transform individual windows; they **do not aggregate longer audio intervals**. Learned temporal abstraction and downstream improvement have not been demonstrated. See the [research boundaries and planned ablations](docs/UPSTREAM_DYNAMICS.md#what-the-comparisons-test).
+The model retains masked prediction and adds three future predictors. The **pointwise baseline** transforms individual windows. A separate [temporal version](docs/TEMPORAL_AGGREGATION.md) aggregates 1/2/4 windows and adds optional within-recording variance pressure at the upper levels. Learned semantic abstraction and downstream improvement have not been demonstrated. See the [comparison boundaries](docs/UPSTREAM_DYNAMICS.md#what-the-comparisons-test).
 
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
-*Conceptual sketch. The AudioSet preset uses 1.01-second windows; the long-recording preset uses 2.01 seconds. See [architecture and temporal grids](docs/UPSTREAM_DYNAMICS.md).*
+*Pointwise baseline sketch. The AudioSet preset uses 1.01-second windows; the long-recording preset uses 2.01 seconds. See [architecture and temporal grids](docs/UPSTREAM_DYNAMICS.md).*
 
 ## Quick start
 
@@ -57,11 +57,14 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 
 | Hydra experiment | Purpose |
 | --- | --- |
-| `audioset` | Pointwise hierarchy, random initialization, one-device FP32 |
+| `audioset` | Preserved pointwise baseline, random initialization, one-device FP32 |
 | `audioset_h100` | Same AudioSet experiment configured for two H100s |
 | `audioset_h100_fast` / `audioset_h100_four` | Measured compact-token presets on two/four H100s, keeping global batch 64 |
 | `audioset_pretrained` | AudioSet hierarchy initialized from released WavJEPA weights |
 | `audioset_flat` | Matched horizons and strides, upper maps replaced by identities |
+| `audioset_temporal` | Causal 1/2/4-window aggregation plus upper-space temporal variance floor |
+| `audioset_temporal_h100` / `audioset_temporal_h100_fast` / `audioset_temporal_h100_four` | Temporal version with two/four-H100 execution settings; new GPU throughput unmeasured |
+| `upstream_temporal_smoke` | Tiny generated-audio CPU training/evaluation of the temporal version |
 | `audioset_baseline` | Masked-only control under the same nine-window AudioSet recipe |
 | `audioset_baseline_h100` / `audioset_baseline_h100_fast` / `audioset_baseline_h100_four` | Masked-only controls matching the two/four-H100 execution presets |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |
@@ -73,7 +76,11 @@ Keep data, initialization, horizons, batch population, and budgets matched acros
 
 The AudioSet masked-only control isolates the added objectives under our crop recipe; it does not reproduce the published WavJEPA recipe. The pointwise-versus-flat comparison changes target coordinates and upper-space regularization together. It cannot by itself establish that aggregation or a particular collapse-prevention mechanism caused a gain.
 
+For a four-way comparison, independently toggle `model.aggregation_windows=[1,1,1]` versus `[1,2,2]` and `model.temporal_variance_weight=0` versus `0.1`. Existing pointwise presets keep the first choice and zero temporal weight. The [temporal guide](docs/TEMPORAL_AGGREGATION.md) specifies support, targets, controls and limitations.
+
 Validation logs [temporal diagnostics](docs/TEMPORAL_DIAGNOSTICS.md): within/between-recording variance, persistence error, and sensitivity to context order. New flat controls regularize the shared space once; old checkpoints preserve their original loss definition.
+
+Before hierarchy training, the [frozen-readout probe](docs/TEMPORAL_DIAGNOSTICS.md#frozen-released-weight-probe) measures the released WavJEPA window states on a reproducible local audio cohort.
 
 ## Evaluate and develop
 

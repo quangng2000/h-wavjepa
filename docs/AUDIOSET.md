@@ -1,7 +1,9 @@
 # AudioSet training
 
-The AudioSet presets keep the pointwise hierarchy and fit a chronological
-excerpt inside a real ten-second clip. The two-H100 preset enables DDP, BF16
+The original AudioSet presets keep the pointwise hierarchy and fit a chronological
+excerpt inside a real ten-second clip. Separate `audioset_temporal*` presets use
+the same excerpt with [causal aggregation and temporal pressure](TEMPORAL_AGGREGATION.md).
+The two-H100 preset enables DDP, BF16
 mixed precision, and activation checkpointing. A two-rank CUDA BF16 train/resume
 test passed, followed by three full-base-model updates on generated waveforms
 on two NVIDIA H100 80 GB HBM3 GPUs. This verifies GPU execution and memory fit
@@ -25,11 +27,16 @@ unmeasured. See [recorded validation evidence](VALIDATION.md).
 | EMA | 0.999 to 0.99999 over the first 100,000 optimizer steps |
 | Two-H100 batch | 32 examples per rank, 64 globally; incomplete training batches dropped |
 
-Every target represents **one future 1.01-second window**. G2/G3 transform one
+In the pointwise baseline, every target represents **one future 1.01-second window**. G2/G3 transform one
 lower state each; their stride does not pool the intervening audio. Student
 and EMA upper maps now receive the same normalized top-eight-layer readout
 transformation. The masked branch's existing teacher tokens are reused for
 future targets, avoiding a duplicate nine-window teacher pass.
+
+The temporal variant instead summarizes 1/2/4 windows per state, with future
+targets covering windows 5, 5–6 and 5–8. Its optional variance floor uses dense
+valid upper states from the observed prefix only. The [temporal guide](TEMPORAL_AGGREGATION.md)
+documents the reduced valid context counts and the four-way comparison.
 
 Before committing a full budget, inspect the held-out [temporal diagnostics](TEMPORAL_DIAGNOSTICS.md)
 for each level. A representation can vary across recordings but remain constant

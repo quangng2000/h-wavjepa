@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - audioset_h100
+  - _self_
+
+tags: [audioset, temporal-aggregation, temporal-variance, two-h100, localereg, research]
+model:
+  aggregation_windows: [1, 2, 2]
+  temporal_variance_weight: 0.1

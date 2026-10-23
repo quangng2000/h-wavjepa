@@ -263,3 +263,140 @@ def test_export_rejects_path_escape(encoder, tmp_path):
     (task / "train.json").write_text(json.dumps({"../outside.wav": ["tone"]}))
     with pytest.raises(ValueError, match="escapes"):
         export_task(HEARModel(encoder), task, tmp_path / "export")
+
+
+@pytest.fixture
+def temporal_encoder(make_config):
+    from omegaconf import OmegaConf
+
+    config = make_config(["experiment=upstream_smoke"])
+    OmegaConf.update(config.model, "aggregation_windows", [1, 2, 2], force_add=True)
+    return hydra.utils.instantiate(config.model).eval()
+
+
+@pytest.mark.parametrize(
+    "representation,index,support", [("low", 0, 1), ("medium", 1, 2), ("high", 2, 4)]
+)
+def test_temporal_hear_matches_dense_valid_states_across_chunk_boundaries(
+    temporal_encoder, representation, index, support, monkeypatch
+):
+    inputs = audio(512 * 9)
+    expected = temporal_encoder.encode(inputs)[index].detach()
+    calls = []
+    original = temporal_encoder.levels_from_low
+
+    def record(low, **kwargs):
+        calls.append(low.shape[1])
+        return original(low, **kwargs)
+
+    monkeypatch.setattr(temporal_encoder, "levels_from_low", record)
+    for batch_size in (1, 2, 5):
+        calls.clear()
+        model = HEARModel(temporal_encoder, representation, window_batch_size=batch_size)
+        values, times = get_timestamp_embeddings(inputs, model)
+        torch.testing.assert_close(values, expected)
+        torch.testing.assert_close(get_scene_embeddings(inputs, model), expected.mean(1))
+        assert calls and max(calls) <= batch_size + support - 1
+        centers = (torch.arange(9 - support + 1) * 512 + (support * 512 - 1) / 2) / 16
+        torch.testing.assert_close(times, centers.expand(2, -1))
+
+
+def test_temporal_hear_preserves_causal_support_across_batches(temporal_encoder):
+    model = HEARModel(temporal_encoder, "high", window_batch_size=2)
+    inputs = audio(512 * 9)
+    changed = inputs.clone()
+    changed[:, 512 * 5 : 512 * 6] = 0
+    before, _ = get_timestamp_embeddings(inputs, model)
+    after, _ = get_timestamp_embeddings(changed, model)
+    # Dense high endpoints are 3..8. Changing low window 5 affects only states
+    # whose four-window support includes it, including across extraction chunks.
+    torch.testing.assert_close(before[:, :2], after[:, :2], rtol=0, atol=0)
+    assert (before[:, 2:] - after[:, 2:]).abs().max() > 1e-6
+
+
+def test_temporal_scene_tail_uses_endpoint_duration_and_timestamps_drop_it(temporal_encoder):
+    inputs = audio(512 * 5 + 128)
+    padded = torch.nn.functional.pad(inputs, (0, 384))
+    expected = temporal_encoder.encode(padded)[2].detach()
+    model = HEARModel(temporal_encoder, "high", window_batch_size=1)
+    weighted = (expected[:, 0] * 512 + expected[:, 1] * 512 + expected[:, 2] * 128) / 1152
+    torch.testing.assert_close(get_scene_embeddings(inputs, model), weighted)
+    values, times = get_timestamp_embeddings(inputs, model)
+    torch.testing.assert_close(values, expected[:, :2])
+    torch.testing.assert_close(times, torch.tensor([[1023.5, 1535.5]]).expand(2, -1) / 16)
+
+
+@pytest.mark.parametrize("samples", [3, 512, 512 * 3, 512 * 3 + 128])
+def test_temporal_short_audio_left_repeats_features_only_and_uses_real_center(
+    temporal_encoder, samples
+):
+    from src.hear_api import _window_readouts
+
+    inputs = audio(samples)
+    model = HEARModel(temporal_encoder, "high", window_batch_size=1)
+    count = max(1, samples // 512)
+    complete_audio = inputs[:, : count * 512]
+    complete_audio = torch.nn.functional.pad(complete_audio, (0, max(0, 512 - samples)))
+    low = temporal_encoder.backbone.encode_windows(
+        temporal_encoder._windows(complete_audio), readout_mode=temporal_encoder.readout_mode
+    )
+    padded_low = torch.cat([low[:, :1].expand(-1, 4 - count, -1), low], dim=1)
+    expected = temporal_encoder.levels_from_low(padded_low)[2]
+    values, times = get_timestamp_embeddings(inputs, model)
+    torch.testing.assert_close(values, expected)
+    torch.testing.assert_close(times, torch.full((2, 1), (samples - 1) / 32))
+    scene = get_scene_embeddings(inputs, model)
+    scene_states = _window_readouts(inputs, model, list(range(0, samples, 512)))
+    torch.testing.assert_close(scene, scene_states[:, 0])
+    assert values.shape == (2, 1, 16)
+
+
+def test_temporal_checkpoint_roundtrip_preserves_support_and_embeddings(temporal_encoder, tmp_path):
+    checkpoint = {"state_dict": deepcopy(temporal_encoder.state_dict())}
+    temporal_encoder.on_save_checkpoint(checkpoint)
+    path = tmp_path / "temporal.ckpt"
+    torch.save(checkpoint, path)
+    loaded = load_model(path, representation="high", window_batch_size=2)
+    assert loaded.encoder.aggregation_windows == (1, 2, 2)
+    assert loaded.encoder.level_support_windows == (1, 2, 4)
+    inputs = audio(512 * 7)
+    actual, times = get_timestamp_embeddings(inputs, loaded)
+    expected, expected_times = get_timestamp_embeddings(inputs, HEARModel(temporal_encoder, "high"))
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(times, expected_times)
+
+
+def test_temporal_identity_upper_maps_are_not_exported_as_duplicate_levels(make_config, tmp_path):
+    from omegaconf import OmegaConf
+
+    config = make_config(["experiment=upstream_smoke"])
+    config.model.hierarchy = False
+    OmegaConf.update(config.model, "aggregation_windows", [1, 2, 2], force_add=True)
+    encoder = hydra.utils.instantiate(config.model).eval()
+    output = export_task(HEARModel(encoder, "high"), make_task(tmp_path), tmp_path / "export")
+    metadata = json.loads((output / "h-wavjepa-export.json").read_text())
+    assert metadata["duplicate_levels"] == []
+    assert metadata["aggregation_windows"] == [1, 2, 2]
+    assert metadata["level_support_windows"] == [1, 2, 4]
+    assert metadata["selected_support_windows"] == 4
+    assert "endpoint_window_real_duration" in metadata["scene_pooling"]
+    assert "evaluation_only" in metadata["short_clip_state_padding"]
+    assert "real clip center" in metadata["timestamp_context"]
+
+
+def test_legacy_pointwise_checkpoint_without_aggregation_metadata_loads_unchanged(
+    encoder, tmp_path
+):
+    checkpoint = {"state_dict": deepcopy(encoder.state_dict())}
+    encoder.on_save_checkpoint(checkpoint)
+    checkpoint[encoder.CHECKPOINT_KEY]["dynamics"].pop("aggregation_windows", None)
+    path = tmp_path / "old-pointwise.ckpt"
+    torch.save(checkpoint, path)
+    loaded = load_model(path, representation="high", window_batch_size=1)
+    assert loaded.encoder.aggregation_windows == (1, 1, 1)
+    assert loaded.support_windows == 1
+    inputs = audio(512 * 5)
+    actual, times = get_timestamp_embeddings(inputs, loaded)
+    expected, expected_times = get_timestamp_embeddings(inputs, HEARModel(encoder, "high"))
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(times, expected_times)

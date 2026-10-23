@@ -201,6 +201,40 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         raise ValueError("state_strides must start at 1 and be nondecreasing")
     if any((cfg.model.context_windows - 1) % stride for stride in strides):
         raise ValueError("context_windows - 1 must be divisible by every state_stride")
+    if any(high % low for low, high in zip(strides[:-1], strides[1:])):
+        raise ValueError("state_strides must be nested integer multiples of the prior level")
+    aggregation = cfg.model.get("aggregation_windows", [1, 1, 1])
+    if (
+        len(aggregation) != 3
+        or any(type(value) is not int or value < 1 for value in aggregation)
+        or aggregation[0] != 1
+    ):
+        raise ValueError("aggregation_windows must contain three positive integers starting at 1")
+    supports = [1]
+    for window, previous_stride in zip(aggregation[1:], strides[:-1], strict=True):
+        supports.append(supports[-1] + (window - 1) * previous_stride)
+    if max(supports) > cfg.model.context_windows:
+        raise ValueError("aggregation support must fit the observed context_windows")
+    weight = cfg.model.get("temporal_variance_weight", 0.0)
+    floor = cfg.model.get("temporal_std_floor", 0.1)
+    epsilon = cfg.model.get("temporal_variance_epsilon", 0.0001)
+    for name, value in (
+        ("temporal_variance_weight", weight),
+        ("temporal_std_floor", floor),
+        ("temporal_variance_epsilon", epsilon),
+    ):
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number")
+    if weight < 0 or epsilon <= 0 or floor <= math.sqrt(epsilon):
+        raise ValueError(
+            "temporal variance requires nonnegative weight, positive epsilon and "
+            "temporal_std_floor > sqrt(temporal_variance_epsilon)"
+        )
+    if weight > 0:
+        if not cfg.model.hierarchy or not all(cfg.model.prediction_weights[1:]):
+            raise ValueError("temporal variance requires learned, active upper forecasting spaces")
+        if any(cfg.model.context_windows - support + 1 < 2 for support in supports[1:]):
+            raise ValueError("temporal variance requires at least two valid upper context states")
     if cfg.data.sample_rate != backbone.sample_rate:
         raise ValueError("data.sample_rate must match backbone.sample_rate")
     expected = backbone.window_samples * (cfg.model.context_windows + max(horizons))

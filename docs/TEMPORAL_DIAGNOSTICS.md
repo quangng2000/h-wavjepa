@@ -1,9 +1,10 @@
 # Pointwise baseline and temporal diagnostics
 
-The current hierarchy remains a **pointwise baseline**. G2 and G3 transform a
+The original hierarchy remains a **pointwise baseline**. G2 and G3 transform a
 single completed audio-window state. Subsampling at strides 2 and 4 does not give
-those states a longer receptive field. A future aggregation model needs a
-separate experiment and matched controls.
+those states a longer receptive field. The separately configured
+[temporal version](TEMPORAL_AGGREGATION.md) adds genuine aggregation and an optional
+within-recording training penalty. The diagnostics on this page remain read-only.
 
 A state can vary across recordings but stay constant throughout each recording.
 This may satisfy the cross-recording distribution penalty and make forecasting
@@ -27,17 +28,24 @@ Validation and test now log these measurements for every level:
 | `forecast_gain_over_persistence` | Persistence MSE minus trained predictor MSE; positive means the predictor improved on persistence. |
 | `time_shifted_context_mse` | Predictor error after cyclically shifting context states by one position while retaining their position labels. |
 | `time_shifted_context_mse_increase` | Shifted-context MSE minus ordinary prediction MSE. |
+| `variance_context_states` | Number of dense valid states used for within-recording variance. |
+| `predictor_context_states` | Number of strided states supplied to the predictor/order probe. |
 
-For example, `val/level_2/within_recording_variance` measures the high-level context
-grid, which currently has only two states. Small within variance alongside larger
+For example, `val/level_2/within_recording_variance` measures the dense valid high
+context grid: five states for the pointwise model, two for the default temporal
+model. Small within variance alongside larger
 between variance identifies a recording-constant risk. Low persistence error and
 no cost from disrupting context order provide further evidence, but these are
 diagnostics, not a learned semantic-quality score or a prevention mechanism.
 
 Variance is estimated **within each local validation batch** and then averaged
 over batches/ranks; the between term is not whole-corpus variance. The context
-grids have different numbers and spacings of observations, so compare a level
-against its matched flat control, not absolute values across grids. The cyclic
+grids have different supports, overlap and valid counts, so compare a level
+against matched controls, not absolute values across grids. Variance diagnostics
+now use dense valid states for both model versions; older pointwise reports used
+the sparse training grids and are not directly comparable. Predictor-order probes
+still use strided states. The high temporal predictor has only one context state,
+so its cyclic shift is unchanged and cannot diagnose order sensitivity. The cyclic
 shift is deterministic and tests one ordering disruption, not all permutations.
 Synthetic degeneracy tests check that recording-constant states remain diverse
 between recordings yet have zero temporal variance and perfect persistence.
@@ -48,6 +56,45 @@ so these diagnostics reuse its teacher activations and add only small predictor
 passes. With the masked objective disabled, validation encodes one additional
 teacher origin window. They run on validation/test, not training steps, and do not
 change the training loss.
+
+## Frozen released-weight probe
+
+Measure the level-zero readout before training upper maps:
+
+```bash
+uv run python -m src.probe_readout \
+  --weights /data/weights/wavjepa/model.safetensors \
+  --manifest /data/audioset/train.jsonl \
+  --output /data/reports/wavjepa-frozen-readout-128.json \
+  --max-recordings 128 --batch-size 4 --window-batch-size 8 --device cpu
+```
+
+Use `--device cuda` on existing CUDA hardware. Inputs must already exist locally:
+the command checks the pinned official checkpoint SHA-256, freezes the online
+encoder, and uses normalized top-eight-layer features averaged over token
+positions. It downloads nothing and trains no hierarchy. The manifest must use
+the [WAV manifest format](AUDIOSET.md#data-and-manifests); audio must be mono 16 kHz and long
+enough for nine contiguous 16,160-sample windows. Short audio is rejected.
+
+The seeded cohort takes one fixed manifest segment per recording, grouping both
+recording IDs and physical-file aliases. It honors manifest offsets, with no
+random crop, resampling or padding. Encoder memory is bounded by
+`--window-batch-size`, independently of the recording batch size. The JSON records
+checkpoint and manifest hashes, selected entries, offsets, geometry, seed and
+readout. It refuses to overwrite an existing report. Audio payload hashes are
+not checked; the supplied manifest remains responsible for dataset provenance.
+
+`statistics` describes all nine windows; `observed_prefix_statistics` describes
+the first five states from the same forward passes, matching the default training
+prefix. Both include absolute within/between-recording variance, their fraction,
+feature norms and adjacent-window change. Unlike the training diagnostics above,
+the between term covers the **whole selected cohort**, using merged float64
+moments, and is independent of batch partitioning up to rounding.
+
+Between-recording variance dominating the within term would support investigating
+the readout and upper-space shortcut. It is not a calibrated collapse threshold,
+and feature scale matters. The probe's tests use constructed states and tiny
+fixtures; no released-weight AudioSet result is claimed in this repository yet.
 
 ## Flat-control regularization
 

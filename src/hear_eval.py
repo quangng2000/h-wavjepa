@@ -102,7 +102,9 @@ def export_task(
         "average_top_k_layers": model.encoder.backbone.config["average_top_k_layers"],
         "hierarchy": model.encoder.config["hierarchy"],
         "duplicate_levels": (
-            [] if model.encoder.config["hierarchy"] else ["low", "medium", "high"]
+            []
+            if model.encoder.config["hierarchy"] or model.encoder.level_support_windows != (1, 1, 1)
+            else ["low", "medium", "high"]
         ),
         "sample_rate": model.sample_rate,
         "window_samples": model.encoder.window_samples,
@@ -116,15 +118,34 @@ def export_task(
             else model.encoder.window_samples
         ),
         "training_state_strides": list(model.encoder.state_strides),
+        "aggregation_windows": list(model.encoder.aggregation_windows),
+        "level_support_windows": list(model.encoder.level_support_windows),
+        "selected_support_windows": model.support_windows,
+        "scene_pooling": (
+            "mean_valid_frontend_tokens"
+            if model.representation == "backbone"
+            else "mean_valid_dense_states_weighted_by_endpoint_window_real_duration"
+        ),
+        "short_clip_state_padding": (
+            "not_applicable"
+            if model.representation == "backbone"
+            else "evaluation_only_repeat_first_low_state_on_left_to_selected_support"
+        ),
         "frontend_receptive_field_samples": model.encoder.backbone.receptive_field_samples,
         "padding": (
             "right-zero-pad context; retain only tokens with real frontend support; "
             "one centered padded token below one receptive field"
             if model.representation == "backbone"
-            else "right-zero-pad scene tail and duration-weight; omit timestamp window tail "
-            "unless clip is short, then return one centered padded-context state"
+            else "right-zero-pad scene tail and weight endpoint duration; omit timestamp "
+            "waveform tail unless shorter than one window; repeat first low state on left "
+            "if fewer states than selected support and return one state at real clip center"
         ),
-        "timestamp_context": "bidirectional completed window; not streaming",
+        "timestamp_context": (
+            "bidirectional completed window; not streaming"
+            if model.representation == "backbone"
+            else "causal aggregation of completed bidirectional windows; full support center; "
+            "short-clip fallback uses real clip center; not streaming timestamps"
+        ),
     }
     (output / "h-wavjepa-export.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return output

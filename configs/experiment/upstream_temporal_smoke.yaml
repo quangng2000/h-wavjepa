@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - upstream_smoke
+  - _self_
+
+tags: [upstream-wavjepa, temporal-aggregation, temporal-variance, smoke, not-a-benchmark]
+model:
+  aggregation_windows: [1, 2, 2]
+  temporal_variance_weight: 0.1
