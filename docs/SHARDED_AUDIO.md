@@ -75,8 +75,9 @@ progress. This Unix signal deadline also protects synchronous held-out reads and
 respects an earlier outer probe deadline. No complete corpus extraction is needed.
 
 `data.worker_timeout_seconds=180` bounds the wait for a spawned worker batch.
-The H100 DDP strategy sets a separate 180-second collective timeout, so a failed
-reader cannot leave peers waiting for the former 30-minute default. These are
+Ordinary H100 runs set a separate 180-second collective timeout.
+[Bounded training segments](TRAINING_SEGMENTS.md) extend it to cover synchronous
+checkpoint publication plus 120 seconds (720 seconds by default). These are
 failure bounds, not recovery: a stalled/failed rank aborts the job. A bounded
 training segment additionally uses its existing parent-process watchdog to stop
 all owned ranks and workers. Nonfinite updates remain fail-closed; optimizer/EMA

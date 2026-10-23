@@ -11,6 +11,7 @@ strategy:
   find_unused_parameters: false
   timeout:
     _target_: datetime.timedelta
+    # train_segment.py raises this to cover synchronous S3 publication + 120s.
     seconds: 180
 precision: bf16-mixed
 # Throughput preset: seeded inputs/masks, without forcing deterministic kernels.

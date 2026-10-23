@@ -47,6 +47,15 @@ minutes**. These margins are conservative inputs, not measured full-corpus
 validation or checkpoint upload durations. Measure the upload plus full readback
 and validation tail before treating them as sufficient for production.
 
+Segment runs raise the DDP collective timeout to at least the transfer budget
+plus **120 seconds**: **720 seconds** with the default 600-second transfer budget.
+This lets peers wait for rank zero's publication result; a longer preset timeout
+is preserved. Ordinary H100 runs retain their 180-second timeout. The durable
+callback rejects a shorter timeout at setup, including outside the segment runner.
+The transfer deadline is checked cooperatively around SDK operations; the extra
+time allows an in-flight request and the result broadcast to finish. It is not
+an exact wall-clock guarantee; the segment watchdog still bounds the whole job.
+
 ## Required inputs and credentials
 
 - A completed staging index, stored locally with its exact SHA256. Partial
@@ -142,5 +151,6 @@ from `training_complete`; only reaching step 375,000 completes training.
 
 Local CPU tests cover full model/AdamW/LR/EMA resume, Timer reset, a durable save
 before final validation, corruption and publication failures, bounded retention,
-and watchdog termination during blocked setup. They do not establish live S3
+timeout configuration and rejection, two-rank Gloo publication success/error
+handoffs, and watchdog termination during blocked setup. They do not establish live S3
 checkpoint transfer time or corrected four-H100 streaming throughput.

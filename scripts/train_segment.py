@@ -31,6 +31,7 @@ from scripts.segment_checkpoint import (  # noqa: E402
     SHA,
     CheckpointRepository,
     checkpoint_client,
+    minimum_checkpoint_collective_timeout,
 )
 from src.utils.runtime import atomic_json, file_sha256  # noqa: E402
 
@@ -75,6 +76,9 @@ class SegmentBudget:
 
     def report(self):
         return asdict(self) | {
+            "minimum_ddp_timeout_seconds": minimum_checkpoint_collective_timeout(
+                self.transfer_timeout_seconds
+            ),
             "platform_max_duration_minutes": self.platform_max_minutes,
             "platform_max_restarts": 0,
             "platform_resume": "none",
@@ -171,6 +175,7 @@ def verify_resume_state(path: Path, receipt: dict, index_sha256: str):
 
 def make_config(plan: dict):
     from hydra import compose, initialize_config_dir
+    from hydra.utils import instantiate
     from omegaconf import OmegaConf
 
     with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
@@ -216,6 +221,15 @@ def make_config(plan: dict):
     cfg.trainer.max_steps = 375000
     cfg.trainer.num_sanity_val_steps = 0
     cfg.trainer.enable_model_summary = False
+    # Peers wait in a collective while rank zero verifies the durable upload.
+    # Raise only segment runs' timeout, preserving any longer preset timeout.
+    cfg.trainer.strategy.timeout = {
+        "_target_": "datetime.timedelta",
+        "seconds": max(
+            instantiate(cfg.trainer.strategy.timeout).total_seconds(),
+            minimum_checkpoint_collective_timeout(plan["budget"]["transfer_timeout_seconds"]),
+        ),
+    }
     cfg.ckpt_path = plan["resume_path"]
     cfg.train, cfg.test = True, False
     if (

@@ -14,10 +14,12 @@ import math
 import os
 import re
 import time
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
 from lightning.pytorch.callbacks import Timer
+from lightning.pytorch.strategies import DDPStrategy
 
 from src.callbacks.step_checkpoint import StepCheckpoint
 from src.stage_audioset import MAX_OBJECT_BYTES, Store
@@ -25,6 +27,13 @@ from src.utils.runtime import atomic_json, file_sha256
 
 SHA = re.compile(r"[a-f0-9]{64}")
 RUN_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{7,79}")
+
+
+def minimum_checkpoint_collective_timeout(transfer_timeout_seconds: float) -> int:
+    """Allow publication's cooperative deadline plus SDK/collective completion time."""
+    if not math.isfinite(transfer_timeout_seconds) or transfer_timeout_seconds <= 0:
+        raise ValueError("Checkpoint transfer timeout must be finite and positive")
+    return math.ceil(transfer_timeout_seconds + 120)
 
 
 def checkpoint_client(endpoint: str):
@@ -288,7 +297,8 @@ class DurableStepCheckpoint(StepCheckpoint):
 
     Synchronous publication is intentionally simple: no checkpoint file can be
     replaced or pruned while its bytes are still uploading. All DDP ranks wait
-    for rank zero's result, and all raise if publication fails.
+    for rank zero's result, and all raise if publication fails. Their collective
+    timeout must also cover the transfer budget and its completion margin.
     """
 
     def __init__(
@@ -302,11 +312,25 @@ class DurableStepCheckpoint(StepCheckpoint):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        minimum_checkpoint_collective_timeout(transfer_timeout_seconds)
         self.repository_options = dict(repository_options)
         self.segment_id, self.receipt_path = segment_id, Path(receipt_path)
         self.data_seed = data_seed
         self.transfer_timeout_seconds, self.hard_deadline = transfer_timeout_seconds, hard_deadline
         self.last_receipt = None
+
+    def setup(self, trainer, pl_module, stage):
+        if isinstance(trainer.strategy, DDPStrategy):
+            # Lightning stores the timeout passed to init_process_group here.
+            # Check the actual strategy, including when used outside our runner.
+            timeout = trainer.strategy._timeout
+            minimum = minimum_checkpoint_collective_timeout(self.transfer_timeout_seconds)
+            if not isinstance(timeout, timedelta) or timeout.total_seconds() < minimum:
+                raise ValueError(
+                    f"Durable checkpoint DDP collective timeout must be at least {minimum}s "
+                    "(checkpoint transfer timeout plus 120s); configure the strategy before fit"
+                )
+        super().setup(trainer, pl_module, stage)
 
     def _publish(self, path: Path, step: int):
         deadline = min(time.time() + self.transfer_timeout_seconds, self.hard_deadline - 30)

@@ -6,11 +6,14 @@ import subprocess
 import sys
 import time
 from copy import deepcopy
+from datetime import timedelta
 from types import SimpleNamespace
 
 import lightning as L
 import pytest
 import torch
+from hydra.utils import instantiate
+from lightning.pytorch.strategies import DDPStrategy
 from test_stage_audioset import FakeS3
 from torch.utils.data import DataLoader, IterableDataset
 
@@ -303,6 +306,83 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     assert cfg.ckpt_path == "/tmp/verified-resume.ckpt"
     assert cfg.seed == 42 and cfg.data.seed == 1042
     assert list(cfg.callbacks) == ["timer", "model_checkpoint"]
+
+
+@pytest.mark.parametrize(
+    ("transfer_seconds", "collective_seconds"), [(30, 180), (600, 720), (900.25, 1021)]
+)
+def test_segment_collective_timeout_covers_configured_publication_budget(
+    tmp_path, transfer_seconds, collective_seconds
+):
+    segment = plan(tmp_path)
+    segment["budget"]["transfer_timeout_seconds"] = transfer_seconds
+    cfg = make_config(segment)
+    strategy = instantiate(cfg.trainer.strategy)
+    assert isinstance(strategy, DDPStrategy)
+    assert strategy._timeout == timedelta(seconds=collective_seconds)
+    assert cfg.callbacks.model_checkpoint.transfer_timeout_seconds == transfer_seconds
+    assert cfg.trainer.strategy.find_unused_parameters is False
+
+
+def test_segment_preserves_a_longer_configured_collective_timeout(tmp_path, monkeypatch):
+    import hydra
+
+    compose = hydra.compose
+
+    def longer_timeout(**kwargs):
+        cfg = compose(**kwargs)
+        cfg.trainer.strategy.timeout.seconds = 1200
+        return cfg
+
+    monkeypatch.setattr(hydra, "compose", longer_timeout)
+    strategy = instantiate(make_config(plan(tmp_path)).trainer.strategy)
+    assert strategy._timeout == timedelta(seconds=1200)
+
+
+def test_regular_h100_preset_retains_short_collective_timeout(request):
+    cfg = request.getfixturevalue("make_config")(["experiment=audioset_h100_four"])
+    strategy = instantiate(cfg.trainer.strategy)
+    assert strategy._timeout == timedelta(seconds=180)
+    assert SegmentBudget(10, 160, 15.12).report()["minimum_ddp_timeout_seconds"] == 720
+
+
+@pytest.mark.parametrize("transfer_seconds", [0, -1, float("inf"), float("nan")])
+def test_segment_rejects_invalid_transfer_timeout(tmp_path, transfer_seconds):
+    segment = plan(tmp_path)
+    segment["budget"]["transfer_timeout_seconds"] = transfer_seconds
+    with pytest.raises(ValueError, match="transfer timeout must be finite and positive"):
+        make_config(segment)
+
+
+@pytest.mark.parametrize("collective_seconds", [180, 600, 719, None])
+def test_durable_callback_rejects_short_or_implicit_ddp_timeout_before_setup(
+    tmp_path, collective_seconds, monkeypatch
+):
+    from src.callbacks.step_checkpoint import StepCheckpoint
+
+    callback = instantiate(make_config(plan(tmp_path)).callbacks.model_checkpoint)
+    strategy = DDPStrategy(
+        timeout=None if collective_seconds is None else timedelta(seconds=collective_seconds)
+    )
+
+    def unexpected_setup(*args, **kwargs):
+        pytest.fail("Unsafe callback must fail before checkpoint setup collectives")
+
+    monkeypatch.setattr(StepCheckpoint, "setup", unexpected_setup)
+    with pytest.raises(ValueError, match="collective timeout must be at least 720s"):
+        callback.setup(SimpleNamespace(strategy=strategy), None, "fit")
+
+
+def test_durable_callback_accepts_segment_timeout_and_runs_checkpoint_setup(tmp_path, monkeypatch):
+    from src.callbacks.step_checkpoint import StepCheckpoint
+
+    cfg = make_config(plan(tmp_path))
+    callback = instantiate(cfg.callbacks.model_checkpoint)
+    trainer = SimpleNamespace(strategy=instantiate(cfg.trainer.strategy))
+    calls = []
+    monkeypatch.setattr(StepCheckpoint, "setup", lambda *args: calls.append(args))
+    callback.setup(trainer, None, "fit")
+    assert calls == [(callback, trainer, None, "fit")]
 
 
 def test_segment_data_seed_changes_deterministically_without_model_or_schedule_change(tmp_path):
