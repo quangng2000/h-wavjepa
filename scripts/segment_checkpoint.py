@@ -409,14 +409,20 @@ class DurableStepCheckpoint(StepCheckpoint):
         receipt_path: str,
         transfer_timeout_seconds: float,
         hard_deadline: float,
+        first_checkpoint_step: int | None = None,
         **kwargs,
     ):
+        if first_checkpoint_step is not None and (
+            type(first_checkpoint_step) is not int or first_checkpoint_step < 1
+        ):
+            raise ValueError("first_checkpoint_step must be a positive integer or None")
         super().__init__(**kwargs)
         minimum_checkpoint_collective_timeout(transfer_timeout_seconds)
         self.repository_options = dict(repository_options)
         self.segment_id, self.receipt_path = segment_id, Path(receipt_path)
         self.data_seed = data_seed
         self.transfer_timeout_seconds, self.hard_deadline = transfer_timeout_seconds, hard_deadline
+        self.first_checkpoint_step = first_checkpoint_step
         self.last_receipt = None
 
     def setup(self, trainer, pl_module, stage):
@@ -464,13 +470,29 @@ class DurableStepCheckpoint(StepCheckpoint):
                 f"Durable checkpoint publication failed ({outcome['error']}); stopping"
             )
         self.last_receipt = outcome["receipt"]
+        if trainer.is_global_zero:
+            record = self.last_receipt["checkpoint"]
+            print(
+                json.dumps(
+                    {
+                        "event": "checkpoint_published",
+                        "step": record["step"],
+                        "sha256": record["sha256"],
+                        "bytes": record["bytes"],
+                    },
+                    allow_nan=False,
+                ),
+                flush=True,
+            )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
         # Lightning may run full validation after Timer requests a stop. Make
         # this optimizer step durable BEFORE that tail consumes the reserve.
+        # An optional early save protects the first shard refill without making
+        # every later publication equally frequent. Normal cadence wins ties.
         if (
-            trainer.should_stop
+            (trainer.should_stop or trainer.global_step == self.first_checkpoint_step)
             and trainer.global_step > 0
             and self._last_global_step_saved != trainer.global_step
         ):

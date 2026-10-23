@@ -19,7 +19,8 @@ train_random_crop: true
 train_drop_last: true
 # Per worker, retaining WAV bytes: this is local mixing, not corpus-wide IID.
 shuffle_buffer: 128
-# Bound the entire object read (including retries), then stalled worker batches.
+# Bound the entire object read, including up to three resumable S3 requests,
+# then stalled worker batches. Production segments use 300/360 s within DDP720 s.
 download_timeout_seconds: 120
 worker_timeout_seconds: 180
 seed: ${seed}

@@ -505,6 +505,11 @@ def make_config(plan: dict):
             "filename": "step_{step:07d}",
             "auto_insert_metric_name": False,
             "every_n_train_steps": plan["checkpoint_every_steps"],
+            "first_checkpoint_step": 250,
+        },
+        "progress": {
+            "_target_": "scripts.training_progress.TrainingProgress",
+            "every_n_steps": 100,
         },
     }
     if plan.get("nat_readiness"):
@@ -527,6 +532,10 @@ def make_config(plan: dict):
             raise ValueError("Frozen naturalistic manifest changed before training")
         cfg.data.naturalistic_manifest = str(manifest)
     cfg.data.num_workers = 1
+    # Shared object storage can deliver a healthy ~625 MB shard in over two
+    # minutes. All ranged retries share this bound; peers have 720s for DDP.
+    cfg.data.download_timeout_seconds = 300
+    cfg.data.worker_timeout_seconds = 360
     cfg.data.allow_partial_index = False
     cfg.data.allow_stream_restart_on_resume = True
     cfg.data.seed = plan["resolved_data_seed"]

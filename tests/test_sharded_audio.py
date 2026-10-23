@@ -31,9 +31,18 @@ class FakeS3:
         self.objects = {}
         self.gets = []
 
-    def get_object(self, *, Bucket, Key):
+    def get_object(self, *, Bucket, Key, Range=None):
         self.gets.append((Bucket, Key))
-        return {"Body": io.BytesIO(self.objects[Key])}
+        raw = self.objects[Key]
+        start = int(Range.removeprefix("bytes=").removesuffix("-")) if Range else 0
+        result = {
+            "Body": io.BytesIO(raw[start:]),
+            "ContentLength": len(raw) - start,
+            "ResponseMetadata": {"HTTPStatusCode": 206 if Range else 200},
+        }
+        if Range:
+            result["ContentRange"] = f"bytes {start}-{len(raw) - 1}/{len(raw)}"
+        return result
 
 
 def make_wav(values=range(32), rate=16000):
@@ -458,7 +467,7 @@ def test_cache_evicts_before_download_and_rechecks_cached_digest(tmp_path):
     assert len(store.gets) == 3
 
 
-def test_interrupted_s3_body_restarts_object_with_bounded_retries(tmp_path, monkeypatch):
+def test_interrupted_s3_body_resumes_exact_suffix_with_bounded_retries(tmp_path, monkeypatch):
     store = FakeS3()
     shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
     original = store.get_object
@@ -471,17 +480,116 @@ def test_interrupted_s3_body_restarts_object_with_bounded_retries(tmp_path, monk
             return super().read(100)
 
     def flaky(**kwargs):
-        attempts.append(True)
+        attempts.append(kwargs.get("Range"))
         result = original(**kwargs)
         if len(attempts) < 3:
-            result["Body"] = Interrupted(store.objects[shard["key"]])
+            raw = result["Body"].read()
+            result["Body"].close()
+            result["Body"] = Interrupted(raw)
         return result
 
     monkeypatch.setattr(store, "get_object", flaky)
     monkeypatch.setattr(streaming.time, "sleep", lambda _: None)
     cache = streaming._ShardCache(tmp_path, store, "private", shard["bytes"], 0)
     assert cache.get(shard).read_bytes() == store.objects[shard["key"]]
-    assert len(attempts) == 3
+    assert attempts == [None, "bytes=100-", "bytes=200-"]
+    assert not list(tmp_path.glob("*.partial"))
+
+
+@pytest.mark.parametrize("wrong", ["ignored", "offset", "length", "changed_object"])
+def test_resumed_shard_rejects_wrong_range_or_changed_bytes(tmp_path, monkeypatch, wrong):
+    store = FakeS3()
+    shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
+    original = store.get_object
+    responses = []
+
+    def altered(**kwargs):
+        result = original(**kwargs)
+        if "Range" not in kwargs:
+            # A clean premature EOF is also retried at the byte actually written.
+            result["Body"].close()
+            result["Body"] = io.BytesIO(store.objects[shard["key"]][:100])
+        elif wrong == "ignored":
+            result["ResponseMetadata"]["HTTPStatusCode"] = 200
+            result.pop("ContentRange")
+        elif wrong == "offset":
+            result["ContentRange"] = f"bytes 0-{shard['bytes'] - 1}/{shard['bytes']}"
+        elif wrong == "length":
+            result["ContentLength"] += 1
+        else:
+            result["Body"].close()
+            result["Body"] = io.BytesIO(b"x" * (shard["bytes"] - 100))
+        responses.append(result["Body"])
+        return result
+
+    monkeypatch.setattr(store, "get_object", altered)
+    monkeypatch.setattr(streaming.time, "sleep", lambda _: None)
+    cache = streaming._ShardCache(tmp_path, store, "private", shard["bytes"], 0)
+    with pytest.raises(ValueError, match="suffix|byte size|SHA256"):
+        cache.get(shard)
+    assert len(store.gets) == 2
+    assert all(body.closed for body in responses)
+    assert not list(tmp_path.glob("*.tar"))
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_repeated_interrupted_reads_stop_at_three_requests_and_discard_partial(
+    tmp_path, monkeypatch
+):
+    store = FakeS3()
+    shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
+    original = store.get_object
+    ranges = []
+
+    def truncated(**kwargs):
+        ranges.append(kwargs.get("Range"))
+        result = original(**kwargs)
+        prefix = result["Body"].read(100)
+        result["Body"].close()
+        result["Body"] = io.BytesIO(prefix)
+        return result
+
+    monkeypatch.setattr(store, "get_object", truncated)
+    monkeypatch.setattr(streaming.time, "sleep", lambda _: None)
+    cache = streaming._ShardCache(tmp_path, store, "private", shard["bytes"], 0)
+    with pytest.raises(RuntimeError, match="three bounded attempts"):
+        cache.get(shard)
+    assert ranges == [None, "bytes=100-", "bytes=200-"]
+    assert not list(tmp_path.glob("*.tar"))
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_resumed_requests_share_one_aggregate_deadline(tmp_path, monkeypatch):
+    import time
+
+    store = FakeS3()
+    shard = add_shard(store, "unbal_train000", "train", ["00000000001"])
+    original = store.get_object
+    real_sleep = time.sleep
+
+    class SlowPrefix(io.BytesIO):
+        def read(self, size=-1):
+            real_sleep(0.035)
+            return super().read(100)
+
+    def slow(**kwargs):
+        result = original(**kwargs)
+        raw = result["Body"].read(100)
+        result["Body"].close()
+        result["Body"] = SlowPrefix(raw)
+        return result
+
+    monkeypatch.setattr(store, "get_object", slow)
+    monkeypatch.setattr(streaming.time, "sleep", lambda _: real_sleep(0.001))
+    cache = streaming._ShardCache(
+        tmp_path, store, "private", shard["bytes"], 0, download_timeout_seconds=0.12
+    )
+    start = time.monotonic()
+    with pytest.raises(streaming.ShardDownloadTimeout, match="total deadline"):
+        cache.get(shard)
+    assert time.monotonic() - start < 0.5
+    assert len(store.gets) == 2
+    assert not list(tmp_path.glob("*.tar"))
     assert not list(tmp_path.glob("*.partial"))
 
 

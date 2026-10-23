@@ -55,6 +55,10 @@ class ShardDownloadTimeout(RuntimeError):
     """Total object deadline, distinct from a retryable socket timeout."""
 
 
+class _ShardReadInterrupted(RuntimeError):
+    """A body ended before its declared final byte; resume the written prefix."""
+
+
 @contextlib.contextmanager
 def _read_deadline(seconds: float):
     """Bound GET, every response read, and retries on our Unix input processes.
@@ -274,44 +278,72 @@ class _ShardCache:
         temporary = path.with_suffix(".partial")
         temporary.unlink(missing_ok=True)
         from botocore.exceptions import (
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
             IncompleteReadError,
             ReadTimeoutError,
             ResponseStreamingError,
         )
 
         # botocore retries failed requests, but not interrupted StreamingBody reads.
-        # Restart those whole objects; never retain a partially verified download.
-        with _read_deadline(self.download_timeout_seconds):
-            for attempt in range(3):
-                digest, size = hashlib.sha256(), 0
-                try:
-                    response = self.client.get_object(Bucket=self.bucket, Key=shard["key"])
-                    with (
-                        contextlib.closing(response["Body"]) as body,
-                        temporary.open("xb") as output,
+        # Keep bytes already written across transient failures. Every resumed GET
+        # must name that exact suffix; the complete object still needs its pinned
+        # SHA256 before it becomes visible. All attempts share one hard deadline.
+        digest, size = hashlib.sha256(), 0
+        try:
+            with _read_deadline(self.download_timeout_seconds), temporary.open("xb") as output:
+                for attempt in range(3):
+                    try:
+                        request = {"Bucket": self.bucket, "Key": shard["key"]}
+                        if size:
+                            request["Range"] = f"bytes={size}-"
+                        response = self.client.get_object(**request)
+                        with contextlib.closing(response["Body"]) as body:
+                            if size and (
+                                response.get("ContentRange")
+                                != f"bytes {size}-{shard['bytes'] - 1}/{shard['bytes']}"
+                                or response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 206
+                            ):
+                                raise ValueError(
+                                    "S3 did not return the exact requested shard suffix"
+                                )
+                            if (
+                                response.get("ContentLength", shard["bytes"] - size)
+                                != shard["bytes"] - size
+                            ):
+                                raise ValueError("Audio shard response has an unexpected byte size")
+                            for chunk in iter(lambda: body.read(1024**2), b""):
+                                size += len(chunk)
+                                if size > shard["bytes"]:
+                                    raise ValueError("Audio shard exceeded its indexed byte size")
+                                output.write(chunk)
+                                digest.update(chunk)
+                        if size < shard["bytes"]:
+                            raise _ShardReadInterrupted("Audio shard body ended prematurely")
+                        if digest.hexdigest() != shard["sha256"]:
+                            raise ValueError("Audio shard byte size or SHA256 mismatch")
+                        break
+                    except (
+                        ConnectionResetError,
+                        TimeoutError,
+                        ConnectionClosedError,
+                        ConnectTimeoutError,
+                        EndpointConnectionError,
+                        IncompleteReadError,
+                        ReadTimeoutError,
+                        ResponseStreamingError,
+                        _ShardReadInterrupted,
                     ):
-                        for chunk in iter(lambda: body.read(1024**2), b""):
-                            size += len(chunk)
-                            if size > shard["bytes"]:
-                                raise ValueError("Audio shard exceeded its indexed byte size")
-                            digest.update(chunk)
-                            output.write(chunk)
-                    if size != shard["bytes"] or digest.hexdigest() != shard["sha256"]:
-                        raise ValueError("Audio shard byte size or SHA256 mismatch")
-                    temporary.replace(path)
-                    return path
-                except (
-                    ConnectionResetError,
-                    TimeoutError,
-                    IncompleteReadError,
-                    ReadTimeoutError,
-                    ResponseStreamingError,
-                ):
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.25 * 2**attempt)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                        if attempt == 2:
+                            raise RuntimeError(
+                                "Audio shard transfer failed after three bounded attempts"
+                            ) from None
+                        time.sleep(0.25 * 2**attempt)
+            temporary.replace(path)
+            return path
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _manifest(raw: bytes, split: str, expected: dict) -> set[str]:

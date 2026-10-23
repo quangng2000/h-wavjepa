@@ -187,11 +187,21 @@ model seed or LR/EMA schedule; it does not provide sample-exact continuity.
 
 ## Durable handoff and failure behavior
 
-Every 5,000 updates and at a normal final stop, Lightning writes a full local
-checkpoint. Rank zero uploads it under an immutable step/SHA256 key, reads back
+The production runner first saves at update 250, then every 5,000 updates and at
+a normal final stop. Lightning writes a full local checkpoint. Rank zero uploads it under an immutable step/SHA256 key, reads back
 the **complete object**, verifies its SHA256 and byte count, then publishes and
 verifies `latest.json`. All ranks wait for this result. A Timer stop captures the
 final optimizer step before Lightning starts its final validation pass.
+
+Rank zero prints compact progress every 100 optimizer steps, including scalar
+loss and the observed interval update rate. A separate publication record appears
+only after a checkpoint has passed complete remote verification.
+
+Production shard reads share a 300-second total deadline across at most three
+requests. Interrupted bodies resume the remaining byte range, requiring exact
+range/length headers and a final whole-object SHA256 match. Worker batches have
+a 360-second timeout, beneath the segment's minimum 720-second DDP timeout.
+The ordinary non-segment presets retain their shorter timeout settings.
 
 At most two checkpoint objects are retained beneath the owned prefix. Before
 pruning the older object, the current verified checkpoint is reconfirmed; its

@@ -441,7 +441,12 @@ def test_production_config_preserves_objective_global_batch_and_absolute_schedul
     assert cfg.trainer.gradient_clip_val == 1 and cfg.model.optimizer.fused is False
     assert cfg.ckpt_path == "/tmp/verified-resume.ckpt"
     assert cfg.seed == 42 and cfg.data.seed == 1042
-    assert list(cfg.callbacks) == ["timer", "model_checkpoint"]
+    assert list(cfg.callbacks) == ["timer", "model_checkpoint", "progress"]
+    assert cfg.callbacks.model_checkpoint.first_checkpoint_step == 250
+    assert cfg.callbacks.progress.every_n_steps == 100
+    assert cfg.data.download_timeout_seconds == 300
+    assert cfg.data.worker_timeout_seconds == 360
+    assert cfg.data.worker_timeout_seconds < cfg.trainer.strategy.timeout.seconds
     assert list(cfg.model.aggregation_windows) == ([1, 2, 2] if temporal else [1, 1, 1])
     assert cfg.model.temporal_variance_weight == (0.1 if temporal else 0)
     logger = instantiate(cfg.logger.csv)

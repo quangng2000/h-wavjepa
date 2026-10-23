@@ -5,6 +5,15 @@ behavior, not improved representation quality or reproduced benchmark scores.
 
 ## Nat integration, 23 October 2026
 
+The first clean-binaural production attempt reached backward passes but failed
+on the 120-second AudioSet shard download deadline before its first durable
+checkpoint. Recovery adds ranged retries under one 300-second deadline, a
+360-second worker timeout, a first checkpoint at update 250 and progress logs.
+150 focused loader, segment, checkpoint and curriculum checks passed after
+updating the expected callback configuration. A small authenticated read verified
+HTTP 206 and exact range/length headers on the private storage endpoint. This is
+storage API verification, not a GPU throughput benchmark.
+
 Clean-to-Nat curriculum support passed 139 focused checks covering checkpoint
 sealing, full-state restore, one-way data transitions, readiness polling and
 the CPU handoff gate. An additional 60 related data/config checks passed.
