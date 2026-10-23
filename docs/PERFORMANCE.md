@@ -29,8 +29,9 @@ remote input, validation, checkpoint upload and interruptions. Adding an assumed
 **43.6 hours / $659** on four. This margin is a planning assumption, not measured
 full-run overhead. Calendar discounts are not included.
 
-The initial live streaming probe was stopped during startup. Its input workers
-used the unsafe Linux fork-after-NCCL combination. Both loaders now explicitly
+The initial live streaming probe was stopped before producing a timing result.
+Its input workers used the unsafe Linux fork-after-NCCL combination, but its logs
+did not establish the exact stall location. Both loaders now explicitly
 spawn worker processes; corrected live streaming validation is required before
 these compute projections qualify a full training run.
 
@@ -119,6 +120,11 @@ must impose a runtime/cost bound. A passing local-pilot benchmark alone does not
 establish full-corpus end-to-end throughput.
 
 ## Long runs
+
+For the planned four-GPU run with manual funding between bounded jobs, use the
+[training segment runner](TRAINING_SEGMENTS.md). It adds verified private-S3
+handoff, a full-process runtime bound, and explicit budget and streaming-probe
+gates; it does not provision GPUs or authorize additional spending.
 
 Use `callbacks=step_checkpoint trainer.min_epochs=0` with the infinite streaming
 iterator. This preserves a latest full checkpoint every 5,000 updates and at a
