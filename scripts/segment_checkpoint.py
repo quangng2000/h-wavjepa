@@ -100,6 +100,7 @@ class CheckpointRepository:
         clean_binaural: bool = False,
         curriculum_source: dict | None = None,
         managed_upload: bool = False,
+        batch_transition: dict | None = None,
     ):
         if not RUN_ID.fullmatch(run_id) or not SHA.fullmatch(index_sha256):
             raise ValueError("Expected a stable run ID and frozen index SHA256")
@@ -110,13 +111,10 @@ class CheckpointRepository:
         if naturalistic_manifest_sha256 is not None and (
             not isinstance(naturalistic_manifest_sha256, str)
             or not SHA.fullmatch(naturalistic_manifest_sha256)
-            or global_batch != 16
         ):
-            raise ValueError(
-                "Nat checkpoint ownership requires a manifest SHA256 and global batch 16"
-            )
-        if clean_binaural and (naturalistic_manifest_sha256 is not None or global_batch != 16):
-            raise ValueError("Clean binaural checkpoints require batch 16 and no Nat manifest")
+            raise ValueError("Nat checkpoint ownership requires a manifest SHA256")
+        if clean_binaural and naturalistic_manifest_sha256 is not None:
+            raise ValueError("Clean binaural checkpoints require no Nat manifest")
         if curriculum_source is not None:
             if (
                 naturalistic_manifest_sha256 is None
@@ -127,6 +125,37 @@ class CheckpointRepository:
                 or curriculum_source.get("prefix") == prefix
             ):
                 raise ValueError("Curriculum lineage requires a distinct pinned clean source")
+        if batch_transition is not None:
+            required = {
+                "source_run_id",
+                "source_prefix",
+                "source_checkpoint_sha256",
+                "source_optimizer_step",
+                "old_global_batch",
+                "new_global_batch",
+            }
+            if (
+                not isinstance(batch_transition, dict)
+                or set(batch_transition) != required
+                or not RUN_ID.fullmatch(batch_transition.get("source_run_id", ""))
+                or not SHA.fullmatch(batch_transition.get("source_checkpoint_sha256", ""))
+                or not isinstance(batch_transition.get("source_prefix"), str)
+                or not batch_transition["source_prefix"].endswith(
+                    "/" + batch_transition["source_run_id"]
+                )
+                or batch_transition["source_prefix"] == prefix
+                or type(batch_transition.get("source_optimizer_step")) is not int
+                or not 0 < batch_transition["source_optimizer_step"] < 375000
+                or type(batch_transition.get("old_global_batch")) is not int
+                or batch_transition["old_global_batch"] < 1
+                or type(batch_transition.get("new_global_batch")) is not int
+                or batch_transition["new_global_batch"] != global_batch
+                or batch_transition["old_global_batch"] == global_batch
+                or curriculum_source is not None
+            ):
+                raise ValueError(
+                    "Batch transition requires a distinct pinned source and changed global batch"
+                )
         parts = prefix.split("/")
         if (
             len(parts) < 2
@@ -165,11 +194,37 @@ class CheckpointRepository:
             )
         if curriculum_source is not None:
             self.owner["curriculum_source"] = dict(curriculum_source)
+        if batch_transition is not None:
+            self.owner["batch_transition"] = dict(batch_transition)
         self.handoff_key = f"{prefix}/clean-handoff.json"
         self.owner_key, self.latest_key = f"{prefix}/owner.json", f"{prefix}/latest.json"
         self.object_pattern = re.compile(
             re.escape(prefix) + r"/checkpoints/step_[0-9]{7}_[a-f0-9]{64}\.ckpt"
         )
+
+    @classmethod
+    def from_owned_source(cls, client, *, bucket, prefix, run_id, index_sha256, check):
+        """Reconstruct an existing immutable owner without adopting or changing it."""
+        store = Store(client, bucket, check)
+        owner = json.loads(store.read(f"{prefix}/owner.json"))
+        if not isinstance(owner, dict):
+            raise ValueError("Invalid checkpoint owner")
+        source = cls(
+            client,
+            bucket=bucket,
+            prefix=prefix,
+            run_id=run_id,
+            index_sha256=index_sha256,
+            check=check,
+            base_data_seed=owner.get("base_data_seed"),
+            global_batch=owner.get("global_batch"),
+            naturalistic_manifest_sha256=owner.get("naturalistic_manifest_sha256"),
+            clean_binaural=owner.get("training_phase") == "clean_binaural",
+            curriculum_source=owner.get("curriculum_source"),
+            batch_transition=owner.get("batch_transition"),
+        )
+        source.assert_owner()  # Reject unknown owner fields and any identity/recipe mismatch.
+        return source
 
     def _keys(self, prefix: str) -> list[str]:
         self.store.check()
@@ -303,7 +358,7 @@ class CheckpointRepository:
             "source_run_id": self.run_id,
             "source_prefix": self.prefix,
             "index_sha256": self.index_sha256,
-            "global_batch": 16,
+            "global_batch": self.owner["global_batch"],
             "input_channels": 2,
             "masked_crops_per_recording": 8,
             "masked_crop_samples": 32160,
@@ -326,7 +381,7 @@ class CheckpointRepository:
             "source_run_id": self.run_id,
             "source_prefix": self.prefix,
             "index_sha256": self.index_sha256,
-            "global_batch": 16,
+            "global_batch": self.owner["global_batch"],
             "input_channels": 2,
             "masked_crops_per_recording": 8,
             "masked_crop_samples": 32160,

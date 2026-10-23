@@ -240,6 +240,49 @@ def test_bootstrap_inputs_cannot_be_replaced_and_existing_manifest_is_preserved(
         )
 
 
+def test_direct_nat_start_preserves_explicit_batch_and_runtime_flags():
+    command = bootstrap.segment_command(
+        ["--global-batch-size", "64", "--nproc-per-node", "8", "--shard-prefetch", "1"],
+        manifest_path="frozen-manifest.json",
+        manifest_sha256="a" * 64,
+        endpoint="https://storage.example.invalid",
+    )
+    assert command[-6:] == [
+        "--global-batch-size",
+        "64",
+        "--nproc-per-node",
+        "8",
+        "--shard-prefetch",
+        "1",
+    ]
+
+
+def test_curriculum_batch_override_is_rejected_before_network(handoff, monkeypatch):
+    _, _, _, options = handoff
+    monkeypatch.setattr(
+        bootstrap, "metadata_client", lambda *_: pytest.fail("Created client before rejection")
+    )
+    with pytest.raises(ValueError, match="override.*global batch"):
+        bootstrap.main(
+            [
+                "--nat-bucket",
+                options["bucket"],
+                "--nat-ready-key",
+                options["ready_key"],
+                "--nat-manifest-path",
+                str(options["manifest_path"]),
+                "--curriculum-ready-key",
+                "curriculum/ready.json",
+                "--curriculum-source-prefix",
+                "training/clean-source-001",
+                "--curriculum-source-run-id",
+                "clean-source-001",
+                "--",
+                "--global-batch-size=16",
+            ]
+        )
+
+
 def test_metadata_timeout_is_bounded_before_network(handoff):
     client, _, _, options = handoff
     invalid = deepcopy(options)

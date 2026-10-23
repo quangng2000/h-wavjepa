@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -361,7 +362,8 @@ def finish_follower(args, repository, *, topology, resume_step, hard_deadline):
 
 
 def validate_launch_options(args):
-    launch_topology(args)
+    topology = launch_topology(args)
+    resolved_global_batch(args, topology)
     nat = getattr(args, "nat", False)
     clean = getattr(args, "clean_binaural", False)
     if nat and clean:
@@ -378,6 +380,23 @@ def validate_launch_options(args):
         not nat or not all(source_fields) or not SHA.fullmatch(source_fields[2])
     ):
         raise ValueError("Curriculum import requires Nat and a complete pinned clean source")
+    batch_source = [
+        getattr(args, name, None)
+        for name in ("batch_source_prefix", "batch_source_run_id", "batch_source_checkpoint_sha256")
+    ]
+    if any(value is not None for value in batch_source):
+        if (
+            not all(batch_source)
+            or not SHA.fullmatch(batch_source[2])
+            or getattr(args, "resume", False)
+            or any(source_fields)
+            or getattr(args, "global_batch_size", None) is None
+            or batch_source[0] == getattr(args, "checkpoint_prefix", None)
+            or topology["nnodes"] != 1
+        ):
+            raise ValueError(
+                "Batch transition requires an explicit new batch, distinct prefix and pinned source; no resume/phase import"
+            )
     readiness = [
         getattr(args, name, None) for name in ("stop_on_nat_ready_key", "stop_on_nat_ready_bucket")
     ]
@@ -414,6 +433,9 @@ def streaming_acceptance(args):
             "scope": "separate streaming GPU preflight only; runtime validation and checkpoint integrity remain enabled",
         }
     topology = launch_topology(args)
+    default_batch = 16 if getattr(args, "nat", False) else 64
+    if resolved_global_batch(args, topology) != default_batch:
+        raise ValueError("Changed global batch requires an explicit separate-preflight waiver")
     if (topology["nnodes"], topology["nproc_per_node"]) != (1, 4):
         raise ValueError("Changed GPU topology requires an explicit separate-preflight waiver")
     if getattr(args, "clean_binaural", False):
@@ -483,6 +505,7 @@ def verify_resume_state(
     nat: bool = False,
     naturalistic_manifest_sha256: str | None = None,
     clean_binaural: bool = False,
+    global_batch: int | None = None,
 ):
     import torch
 
@@ -509,6 +532,16 @@ def verify_resume_state(
     if nat and clean_binaural:
         raise ValueError("Cannot verify a checkpoint as both clean and naturalistic")
     binaural = nat or clean_binaural
+    expected_batch = (16 if binaural else 64) if global_batch is None else global_batch
+    if (
+        type(expected_batch) is not int
+        or expected_batch < 1
+        or (
+            global_batch is not None
+            and receipt.get("owner", {}).get("global_batch") != expected_batch
+        )
+    ):
+        raise ValueError("Invalid checkpoint global batch")
     metadata = HierarchicalWavJEPAModule.validated_checkpoint_metadata(state)
     dynamics = metadata["dynamics"]
     data_state = state.get("ShardedAudioDataModule", {})
@@ -524,7 +557,7 @@ def verify_resume_state(
                 or data_state.get("masked_crops_per_recording") != 8
                 or data_state.get("masked_crop_samples") != 32160
                 or receipt.get("owner", {}).get("training_phase") != "clean_binaural"
-                or receipt.get("owner", {}).get("global_batch") != 16
+                or receipt.get("owner", {}).get("global_batch") != expected_batch
             )
         )
         or (
@@ -536,7 +569,7 @@ def verify_resume_state(
                 or data_state.get("masked_crop_samples") != 32160
                 or receipt.get("owner", {}).get("naturalistic_manifest_sha256")
                 != naturalistic_manifest_sha256
-                or receipt.get("owner", {}).get("global_batch") != 16
+                or receipt.get("owner", {}).get("global_batch") != expected_batch
             )
         )
     ):
@@ -573,7 +606,13 @@ def import_clean_curriculum(
     receipt = source.download_latest(destination)
     if receipt != handoff["checkpoint"] or file_sha256(destination) != expected_checkpoint_sha256:
         raise ValueError("Clean source changed while importing its handoff")
-    step = verify_resume_state(destination, receipt, index_sha256, clean_binaural=True)
+    step = verify_resume_state(
+        destination,
+        receipt,
+        index_sha256,
+        clean_binaural=True,
+        global_batch=source.owner["global_batch"],
+    )
     original = torch.load(destination, map_location="cpu", weights_only=True)
     transition = {
         "source_checkpoint_sha256": expected_checkpoint_sha256,
@@ -584,6 +623,67 @@ def import_clean_curriculum(
     return step, receipt, transition
 
 
+def import_batch_transition(
+    source: CheckpointRepository,
+    destination: Path,
+    *,
+    expected_checkpoint_sha256: str,
+    index_sha256: str,
+    new_global_batch: int,
+    nat: bool = False,
+    clean_binaural: bool = False,
+    naturalistic_manifest_sha256: str | None = None,
+):
+    """Import unchanged complete state; only a new owned run may change its batch."""
+    old_batch = source.owner["global_batch"]
+    if type(new_global_batch) is not int or new_global_batch < 1 or new_global_batch == old_batch:
+        raise ValueError("Batch transition must explicitly change the positive global batch")
+    if source.owner.get("naturalistic_manifest_sha256") != naturalistic_manifest_sha256:
+        raise ValueError("Batch transition cannot change naturalistic assets")
+    expected_phase = "naturalistic" if nat else "clean_binaural" if clean_binaural else None
+    if source.owner.get("training_phase") != expected_phase:
+        raise ValueError("Batch transition cannot change training phase")
+    receipt = source.download_latest(destination)
+    if (
+        receipt["checkpoint"]["sha256"] != expected_checkpoint_sha256
+        or file_sha256(destination) != expected_checkpoint_sha256
+    ):
+        raise ValueError("Batch source changed or differs from its pinned checkpoint SHA256")
+    step = verify_resume_state(
+        destination,
+        receipt,
+        index_sha256,
+        nat=nat,
+        clean_binaural=clean_binaural,
+        naturalistic_manifest_sha256=naturalistic_manifest_sha256,
+        global_batch=old_batch,
+    )
+    if step >= 375000:
+        raise ValueError("Batch source has already completed its optimizer schedule")
+    transition = {
+        "source_run_id": source.run_id,
+        "source_prefix": source.prefix,
+        "source_checkpoint_sha256": expected_checkpoint_sha256,
+        "source_optimizer_step": step,
+        "old_global_batch": old_batch,
+        "new_global_batch": new_global_batch,
+    }
+    return step, receipt, transition
+
+
+def resolved_global_batch(args, topology=None):
+    topology = launch_topology(args) if topology is None else topology
+    default = 16 if getattr(args, "nat", False) or getattr(args, "clean_binaural", False) else 64
+    value = getattr(args, "global_batch_size", None)
+    value = default if value is None else value
+    world = topology["nnodes"] * topology["nproc_per_node"]
+    if type(value) is not int or value < 2 * world or value % world:
+        raise ValueError(
+            "Global recording batch must be divisible by the GPU rank count with at least two recordings per rank"
+        )
+    return value
+
+
 def make_config(plan: dict):
     from hydra import compose, initialize_config_dir
     from hydra.utils import instantiate
@@ -592,7 +692,9 @@ def make_config(plan: dict):
     nat = plan.get("nat", False)
     clean = plan.get("clean_binaural", False)
     binaural = nat or clean
-    global_batch = 16 if binaural else 64
+    global_batch = plan.get("global_batch", 16 if binaural else 64)
+    if type(global_batch) is not int or global_batch < 1:
+        raise ValueError("Global recording batch must be a positive integer")
     experiment = (
         "audioset_clean_binaural_h100_four"
         if clean
@@ -653,6 +755,17 @@ def make_config(plan: dict):
             "all_ranks": True,
         },
     }
+    if plan.get("operator_stop"):
+        # Only rank zero reads the request. Every rank joins the callback's
+        # decision broadcast before the durable checkpoint handles should_stop.
+        cfg.callbacks = {
+            "timer": cfg.callbacks.timer,
+            "operator_stop": {
+                "_target_": "scripts.operator_stop.OperatorStop",
+                **plan["operator_stop"],
+            },
+            **{name: value for name, value in cfg.callbacks.items() if name != "timer"},
+        }
     if plan.get("nat_readiness"):
         readiness = plan["nat_readiness"]
         cfg.callbacks["nat_readiness"] = {
@@ -685,9 +798,26 @@ def make_config(plan: dict):
     cfg.trainer.devices = topology["nproc_per_node"]
     cfg.trainer.num_nodes = topology["nnodes"]
     world_size = cfg.trainer.devices * cfg.trainer.num_nodes
-    if world_size not in {4, 8} or global_batch % world_size:
-        raise ValueError("Distributed layout must evenly partition the original global batch")
+    if world_size not in {4, 8} or global_batch < 2 * world_size or global_batch % world_size:
+        raise ValueError(
+            "Global recording batch requires four/eight ranks and at least two recordings per rank"
+        )
     cfg.data.batch_size = global_batch // world_size
+    shard_prefetch = plan.get("shard_prefetch")
+    if shard_prefetch is None:
+        shard_prefetch = int((cfg.trainer.num_nodes, cfg.trainer.devices) == (1, 8))
+    if type(shard_prefetch) is not int or shard_prefetch not in {0, 1}:
+        raise ValueError("Shard prefetch must be 0 or 1")
+    cfg.data.shard_prefetch = shard_prefetch
+    activation_checkpointing = plan.get("activation_checkpointing", "auto")
+    if activation_checkpointing not in {"auto", "on", "off"}:
+        raise ValueError("Activation checkpointing must be auto, on, or off")
+    if activation_checkpointing != "auto":
+        cfg.model.backbone.config.use_gradient_checkpointing = activation_checkpointing == "on"
+    elif (cfg.trainer.num_nodes, cfg.trainer.devices) == (1, 8):
+        # Spare memory on the eight-H100 node removes activation recomputation.
+        # Batch, crops, optimizer, EMA and the complete loss remain unchanged.
+        cfg.model.backbone.config.use_gradient_checkpointing = False
     cfg.trainer.max_epochs = -1
     cfg.trainer.max_steps = 375000
     cfg.trainer.num_sanity_val_steps = 0
@@ -746,6 +876,16 @@ def worker(plan_path: Path):
         raise ValueError("Worker rank does not match its pinned multihost plan")
     metrics, objects = train(make_config(plan))
     trainer, model = objects["trainer"], objects["model"]
+    from scripts.operator_stop import OperatorStop
+
+    stop_reason = (
+        "operator"
+        if any(
+            isinstance(callback, OperatorStop) and callback.stop_requested
+            for callback in trainer.callbacks
+        )
+        else "bounded_segment"
+    )
     step = trainer.global_step
     if step <= plan["resume_step"] or int(model.ema_updates) != step:
         raise RuntimeError("Segment did not advance optimizer and EMA steps together")
@@ -771,12 +911,17 @@ def worker(plan_path: Path):
             Path(plan["output"]) / "segment-finished.json",
             {
                 "segment_finished": True,
+                "stop_reason": stop_reason,
+                "ready_for_nat": False,
                 "training_complete": step == 375000,
                 "initial_optimizer_step": plan["resume_step"],
                 "final_optimizer_step": step,
                 "ema_updates": int(model.ema_updates),
                 "global_batch": plan["global_batch"],
-                "global_masked_crops": 128 if plan["nat"] or plan.get("clean_binaural") else 0,
+                "global_masked_crops": plan["global_batch"] * 8
+                if plan["nat"] or plan.get("clean_binaural")
+                else 0,
+                "batch_transition": plan.get("batch_transition"),
                 "training_phase": "naturalistic"
                 if plan["nat"]
                 else ("clean_binaural" if plan.get("clean_binaural") else "mono"),
@@ -960,6 +1105,23 @@ def supervise(args, raw_args):
         stop_process_tree(process, owned)
 
 
+def finish_clean_phase(repository, result, output: Path, hard_deadline: float):
+    """An operator pause saves full state but does not seal the clean run."""
+    if result.get("stop_reason") == "operator":
+        result["ready_for_nat"] = False
+        return
+
+    def handoff_check():
+        if time.time() >= hard_deadline - 30:
+            raise TimeoutError("Clean handoff exceeded segment deadline")
+
+    repository.store.check = handoff_check
+    handoff = repository.publish_clean_handoff(result["checkpoint"], writer_finished=True)
+    atomic_json(output / "clean-handoff.json", handoff)
+    result["ready_for_nat"] = True
+    result["clean_handoff_key"] = repository.handoff_key
+
+
 def execute_segment(args):
     budget = segment_budget(args)
     topology = launch_topology(args)
@@ -970,7 +1132,7 @@ def execute_segment(args):
     acceptance = streaming_acceptance(args)
     nat, clean = args.nat, getattr(args, "clean_binaural", False)
     temporal = args.temporal or nat or clean
-    global_batch = 16 if nat or clean else 64
+    global_batch = resolved_global_batch(args, topology)
     started = args.execute_started
     hard_deadline = started + budget.seconds
     training_deadline = hard_deadline - budget.finalization_reserve_seconds
@@ -1005,6 +1167,46 @@ def execute_segment(args):
             "checkpoint_sha256": args.curriculum_source_checkpoint_sha256,
         }
     )
+    client = checkpoint_client(args.checkpoint_endpoint)
+    resume_path, resume_step, transition, batch_transition = None, 0, None, None
+    batch_source_prefix = getattr(args, "batch_source_prefix", None)
+    if batch_source_prefix is not None:
+        source = CheckpointRepository.from_owned_source(
+            client,
+            bucket=args.checkpoint_bucket,
+            prefix=batch_source_prefix,
+            run_id=args.batch_source_run_id,
+            index_sha256=frozen_sha,
+            check=check,
+        )
+        if source.base_data_seed != args.base_data_seed:
+            raise ValueError("Batch transition must preserve the base data seed")
+        resume_path = args.work_dir / "resume.ckpt"
+        resume_step, receipt, batch_transition = import_batch_transition(
+            source,
+            resume_path,
+            expected_checkpoint_sha256=args.batch_source_checkpoint_sha256,
+            index_sha256=frozen_sha,
+            new_global_batch=global_batch,
+            nat=nat,
+            clean_binaural=clean,
+            naturalistic_manifest_sha256=naturalistic_sha,
+        )
+        atomic_json(args.output / "imported-batch-checkpoint.json", receipt)
+    elif args.resume:
+        # Preserve immutable provenance on subsequent segments; never infer a
+        # batch change from a mutable CLI setting or rewrite an existing owner.
+        existing = CheckpointRepository.from_owned_source(
+            client,
+            bucket=args.checkpoint_bucket,
+            prefix=args.checkpoint_prefix,
+            run_id=args.run_id,
+            index_sha256=frozen_sha,
+            check=check,
+        )
+        batch_transition = existing.owner.get("batch_transition")
+        if curriculum_source is None:
+            curriculum_source = existing.owner.get("curriculum_source")
     repository_options = dict(
         bucket=args.checkpoint_bucket,
         prefix=args.checkpoint_prefix,
@@ -1015,12 +1217,10 @@ def execute_segment(args):
         naturalistic_manifest_sha256=naturalistic_sha,
         clean_binaural=clean,
         curriculum_source=curriculum_source,
+        batch_transition=batch_transition,
     )
-    repository = CheckpointRepository(
-        checkpoint_client(args.checkpoint_endpoint), **repository_options, check=check
-    )
+    repository = CheckpointRepository(client, **repository_options, check=check)
     repository.open(initialize=not args.resume)
-    resume_path, resume_step, transition = None, 0, None
     if args.resume:
         resume_path = args.work_dir / "resume.ckpt"
         receipt = repository.download_latest(resume_path)
@@ -1034,22 +1234,25 @@ def execute_segment(args):
             nat=nat,
             naturalistic_manifest_sha256=naturalistic_sha,
             clean_binaural=clean,
+            global_batch=global_batch,
         )
         atomic_json(args.output / "resumed-checkpoint.json", receipt)
         if resume_step == 375000:
             raise ValueError("Training already completed 375000 steps; no new segment is needed")
     elif curriculum_source is not None:
-        source = CheckpointRepository(
-            repository.store.client,
+        source = CheckpointRepository.from_owned_source(
+            client,
             bucket=args.checkpoint_bucket,
             prefix=source_prefix,
             run_id=args.curriculum_source_run_id,
             index_sha256=frozen_sha,
             check=check,
-            base_data_seed=args.base_data_seed,
-            global_batch=16,
-            clean_binaural=True,
         )
+        if (
+            source.owner["global_batch"] != global_batch
+            or source.base_data_seed != args.base_data_seed
+        ):
+            raise ValueError("Clean-to-Nat import must preserve global batch and base data seed")
         resume_path = args.work_dir / "resume.ckpt"
         resume_step, receipt, transition = import_clean_curriculum(
             source,
@@ -1063,10 +1266,19 @@ def execute_segment(args):
     plan = {
         "segment_id": args.segment_id,
         "distributed": topology,
+        "activation_checkpointing": getattr(args, "activation_checkpointing", "auto"),
+        "shard_prefetch": getattr(args, "shard_prefetch", None),
+        "operator_stop": {
+            "request_path": str((args.output / "operator-stop.json").resolve()),
+            "run_id": args.run_id,
+            "segment_id": args.segment_id,
+            "nonce": uuid.uuid4().hex,
+        },
         "pinned_resume_sha256": getattr(args, "resume_sha256", None),
         "nat": nat,
         "clean_binaural": clean,
         "clean_to_nat_transition": transition,
+        "batch_transition": batch_transition,
         "curriculum_source": curriculum_source,
         "nat_readiness": {
             "endpoint": args.data_endpoint,
@@ -1131,18 +1343,9 @@ def execute_segment(args):
     ):
         raise RuntimeError("Worker exited without an advanced, verified final checkpoint")
     if clean:
-        # The sole checkpoint writer's local torchrun process has exited. Remote
-        # followers never publish to this prefix. The orchestrator still waits
-        # for all four node commands before launching the next training phase.
-        def handoff_check():
-            if time.time() >= hard_deadline - 30:
-                raise TimeoutError("Clean handoff exceeded segment deadline")
-
-        repository.store.check = handoff_check
-        handoff = repository.publish_clean_handoff(result["checkpoint"], writer_finished=True)
-        atomic_json(args.output / "clean-handoff.json", handoff)
-        result["ready_for_nat"] = True
-        result["clean_handoff_key"] = repository.handoff_key
+        # Only the local global-rank-zero writer publishes; the orchestrator
+        # must also confirm any remote followers exited before a phase switch.
+        finish_clean_phase(repository, result, args.output, hard_deadline)
     result["wall_seconds"] = time.time() - started
     result["observed_runner_time_cost_at_supplied_rate_usd"] = (
         result["wall_seconds"] / 3600 * budget.maximum_rate_usd_per_hour
@@ -1177,6 +1380,18 @@ def main(argv=None):
     parser.add_argument("--shared-started-at", type=float)
     parser.add_argument("--resume-sha256")
     parser.add_argument(
+        "--activation-checkpointing",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="auto disables activation recomputation on eight local GPUs; other presets stay unchanged",
+    )
+    parser.add_argument(
+        "--shard-prefetch",
+        type=int,
+        choices=(0, 1),
+        help="Look ahead one shard without adding workers; defaults to 1 on eight local GPUs",
+    )
+    parser.add_argument(
         "--temporal",
         action="store_true",
         help="Use the tested temporal aggregation model; omit for the pointwise baseline",
@@ -1187,6 +1402,14 @@ def main(argv=None):
         action="store_true",
         help="Duplicate clean mono into the unchanged two-channel Nat architecture",
     )
+    parser.add_argument(
+        "--global-batch-size",
+        type=int,
+        help="Explicit global recording batch; changes require a new owned prefix",
+    )
+    parser.add_argument("--batch-source-prefix")
+    parser.add_argument("--batch-source-run-id")
+    parser.add_argument("--batch-source-checkpoint-sha256")
     parser.add_argument("--curriculum-source-prefix")
     parser.add_argument("--curriculum-source-run-id")
     parser.add_argument("--curriculum-source-checkpoint-sha256")

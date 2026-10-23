@@ -164,6 +164,7 @@ def test_nonzero_worker_never_writes_global_completion(tmp_path, monkeypatch, mu
         global_step=500,
         is_global_zero=False,
         checkpoint_callback=SimpleNamespace(last_receipt=receipt),
+        callbacks=[],
     )
     for name, value in {
         "WORLD_SIZE": "4" if multihost else "8",
@@ -295,7 +296,11 @@ def test_follower_rejects_changed_resume_before_starting_any_rank(tmp_path, monk
 
     class ReadOnlyRepository:
         def __init__(self, *args, **kwargs):
-            pass
+            self.owner = {}
+
+        @classmethod
+        def from_owned_source(cls, *args, **kwargs):
+            return cls()
 
         def open(self, *, initialize):
             assert initialize is False

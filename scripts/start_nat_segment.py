@@ -301,6 +301,8 @@ def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint, c
         "--curriculum-source-run-id",
         "--curriculum-source-checkpoint-sha256",
     }
+    if curriculum is not None:
+        reserved.add("--global-batch-size")
     if any(argument.split("=", 1)[0] in reserved for argument in segment_args):
         raise ValueError("Segment arguments must not override bootstrap-owned Nat inputs")
     command = [
@@ -319,7 +321,12 @@ def segment_command(segment_args, *, manifest_path, manifest_sha256, endpoint, c
         *segment_args,
     ]
     if curriculum is not None:
+        global_batch = curriculum.get("source_global_batch", 16)
+        if type(global_batch) is not int or global_batch < 4 or global_batch % 4:
+            raise ValueError("Curriculum source global batch must be a positive multiple of four")
         command += [
+            "--global-batch-size",
+            str(global_batch),
             "--curriculum-source-prefix",
             curriculum["source_prefix"],
             "--curriculum-source-run-id",
@@ -360,6 +367,10 @@ def main(argv=None):
         parser.error(
             "Curriculum readiness key, source prefix and source run ID must be supplied together"
         )
+    if args.curriculum_ready_key and any(
+        argument.split("=", 1)[0] == "--global-batch-size" for argument in segment_args
+    ):
+        raise ValueError("Segment arguments must not override the verified curriculum global batch")
     ensure_start_deadline(args.latest_start_utc)
     endpoint = _endpoint(args.nat_endpoint)
     # Validate protected arguments before any network or file operation.
@@ -421,6 +432,12 @@ def main(argv=None):
                 "separate_gpu_preflight": "waived_by_user",
                 "hardware_acceptance_passed": False,
                 "curriculum_source_step": curriculum["source_optimizer_step"]
+                if curriculum
+                else None,
+                "curriculum_global_batch": curriculum.get("source_global_batch", 16)
+                if curriculum
+                else None,
+                "source_batch_transition": curriculum.get("source_batch_transition")
                 if curriculum
                 else None,
             }

@@ -19,6 +19,9 @@ train_random_crop: true
 train_drop_last: true
 # Per worker, retaining WAV bytes: this is local mixing, not corpus-wide IID.
 shuffle_buffer: 128
+# Runtime-only lookahead within each existing consumer; preserves sample order.
+# One verified next shard overlaps current decoding, within the same cache cap.
+shard_prefetch: 0
 # Bound the entire object read, including up to three resumable S3 requests,
 # then stalled worker batches. Production segments use 300/360 s within DDP720 s.
 download_timeout_seconds: 120

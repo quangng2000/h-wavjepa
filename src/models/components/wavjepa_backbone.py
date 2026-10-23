@@ -236,6 +236,19 @@ class WavJEPABackbone(nn.Module):
     def construction_config(self) -> dict[str, Any]:
         return deepcopy(self.config)
 
+    def checkpoint_config_compatible(self, saved: dict[str, Any]) -> bool:
+        """Allow only a boolean activation-recomputation change during resume.
+
+        Checkpointing changes which activations are retained for backward, not
+        the model or objective. Keep the resolved flag in new checkpoints for
+        provenance; all other backbone fields must still match exactly.
+        """
+        if not isinstance(saved, dict) or type(saved.get("use_gradient_checkpointing")) is not bool:
+            return False
+        comparable = deepcopy(saved)
+        comparable["use_gradient_checkpointing"] = self.config["use_gradient_checkpointing"]
+        return comparable == self.config
+
     def _normalized_windows(
         self, waveforms: Tensor, *, window_samples: int | None = None
     ) -> Tensor:

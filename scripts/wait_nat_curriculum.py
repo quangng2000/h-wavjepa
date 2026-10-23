@@ -77,6 +77,48 @@ def _matches(value, expected):
     )
 
 
+def _source_recipe(global_batch):
+    if type(global_batch) is not int or global_batch < 4 or global_batch % 4:
+        raise ValueError("Clean source global batch must be a positive multiple of four")
+    return RECIPE | {"global_batch": global_batch}
+
+
+def _source_batch_transition(owner, *, prefix, final_step):
+    """Validate pinned recipe-change provenance without importing the training stack."""
+    transition = owner.get("batch_transition")
+    if transition is None:
+        return None
+    required = {
+        "source_run_id",
+        "source_prefix",
+        "source_checkpoint_sha256",
+        "source_optimizer_step",
+        "old_global_batch",
+        "new_global_batch",
+    }
+    if (
+        not isinstance(transition, dict)
+        or set(transition) != required
+        or not isinstance(transition.get("source_run_id"), str)
+        or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{7,79}", transition["source_run_id"]) is None
+        or not _safe_key(transition.get("source_prefix"))
+        or not transition["source_prefix"].endswith("/" + transition["source_run_id"])
+        or transition["source_prefix"] == prefix
+        or not isinstance(transition.get("source_checkpoint_sha256"), str)
+        or SHA256.fullmatch(transition["source_checkpoint_sha256"]) is None
+        or type(transition.get("source_optimizer_step")) is not int
+        or not 0 < transition["source_optimizer_step"] < final_step
+        or type(transition.get("old_global_batch")) is not int
+        or transition["old_global_batch"] < 4
+        or transition["old_global_batch"] % 4
+        or type(transition.get("new_global_batch")) is not int
+        or transition["new_global_batch"] != owner["global_batch"]
+        or transition["old_global_batch"] == transition["new_global_batch"]
+    ):
+        raise ValueError("Clean source batch transition provenance is invalid")
+    return transition
+
+
 def fetch_clean_handoff(client, *, bucket, prefix, run_id, index_sha256):
     if (
         not _safe_key(prefix)
@@ -88,9 +130,10 @@ def fetch_clean_handoff(client, *, bucket, prefix, run_id, index_sha256):
     key = prefix + "/clean-handoff.json"
     payload = _bounded_get(client, bucket, key, MAX_RECEIPT_BYTES)
     handoff = json.loads(payload)
+    recipe = _source_recipe(handoff.get("global_batch") if isinstance(handoff, dict) else None)
     if not _matches(
         handoff,
-        RECIPE
+        recipe
         | {
             "schema_version": 1,
             "phase": "clean_binaural",
@@ -107,7 +150,7 @@ def fetch_clean_handoff(client, *, bucket, prefix, run_id, index_sha256):
     if (
         not _matches(
             owner,
-            RECIPE
+            recipe
             | {
                 "schema": 1,
                 "owner": "h-wavjepa-training-segments",
@@ -140,6 +183,7 @@ def fetch_clean_handoff(client, *, bucket, prefix, run_id, index_sha256):
         <= owner["base_data_seed"] + 375000
     ):
         raise ValueError("Clean checkpoint descriptor or remaining training steps are invalid")
+    _source_batch_transition(owner, prefix=prefix, final_step=step)
     if client.head_object(Bucket=bucket, Key=record["key"]).get("ContentLength") != size:
         raise ValueError("Clean checkpoint object size differs from its verified receipt")
     return handoff, {
@@ -182,10 +226,22 @@ def fetch_curriculum_handoff(
         client, bucket=bucket, prefix=source_prefix, run_id=source_run_id, index_sha256=index_sha256
     )
     record = handoff["checkpoint"]["checkpoint"]
+    _source_recipe(value.get("source_global_batch", 16))
+    _source_batch_transition(
+        {
+            "global_batch": handoff["global_batch"],
+            "batch_transition": value.get("source_batch_transition"),
+        },
+        prefix=source_prefix,
+        final_step=record["step"],
+    )
     if (
         value.get("source_handoff") != descriptor
         or value.get("source_checkpoint_sha256") != record["sha256"]
         or value.get("source_optimizer_step") != record["step"]
+        or value.get("source_global_batch", 16) != handoff["global_batch"]
+        or value.get("source_batch_transition")
+        != handoff["checkpoint"]["owner"].get("batch_transition")
         or value.get("nat")
         != {
             "bucket": nat_bucket,
@@ -299,6 +355,8 @@ def wait_for_curriculum(
             "source_handoff": descriptor,
             "source_checkpoint_sha256": handoff["checkpoint"]["checkpoint"]["sha256"],
             "source_optimizer_step": handoff["checkpoint"]["checkpoint"]["step"],
+            "source_global_batch": handoff["global_batch"],
+            "source_batch_transition": handoff["checkpoint"]["owner"].get("batch_transition"),
             "nat": {
                 "bucket": args.nat_bucket,
                 "endpoint": args.nat_endpoint,

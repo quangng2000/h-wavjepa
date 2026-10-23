@@ -24,6 +24,7 @@ import threading
 import time
 import wave
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -250,16 +251,28 @@ class _ShardCache:
         self.directory, self.client, self.bucket = directory, client, bucket
         self.budget, self.minimum_free = budget, minimum_free
         self.download_timeout_seconds = download_timeout_seconds
+        self._get_lock = threading.Lock()
         directory.mkdir(parents=True, exist_ok=True)
 
-    def get(self, shard: dict) -> Path:
+    def get(self, shard: dict, *, protected=(), check=lambda: None) -> Path:
+        # Only the iterator and its one lookahead share this cache. Serialize
+        # admission/eviction through publication; the current reader is pinned.
+        with self._get_lock:
+            return self._get(shard, protected=protected, check=check)
+
+    def _get(self, shard: dict, *, protected, check) -> Path:
+        check()
         path = self.directory / f"{shard['sha256']}.tar"
         if path.is_symlink():
             raise ValueError("Cache objects must not be symlinks")
         if path.exists():
             with path.open("rb") as handle:
-                valid = path.stat().st_size == shard["bytes"] and (
-                    hashlib.file_digest(handle, "sha256").hexdigest() == shard["sha256"]
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(1024**2), b""):
+                    check()
+                    digest.update(chunk)
+                valid = (
+                    path.stat().st_size == shard["bytes"] and digest.hexdigest() == shard["sha256"]
                 )
             if valid:
                 path.touch()
@@ -268,11 +281,22 @@ class _ShardCache:
         if shard["bytes"] > self.budget:
             raise ValueError("A shard exceeds this consumer's cache allocation")
         cached = sorted(self.directory.glob("*.tar"), key=lambda item: item.stat().st_mtime)
-        used = sum(item.stat().st_size for item in cached)
+        # A worker killed without unwinding may leave SDK scratch behind. Count
+        # it against the budget; never delete another process's possible writer.
+        scratch = sum(
+            item.stat().st_size
+            for folder in self.directory.glob(".verified-download-*")
+            for item in folder.rglob("*")
+            if item.is_file()
+        )
+        used = sum(item.stat().st_size for item in cached) + scratch
+        cached = [item for item in cached if item not in protected]
         while cached and used + shard["bytes"] > self.budget:
             oldest = cached.pop(0)
             used -= oldest.stat().st_size
             oldest.unlink()
+        if used + shard["bytes"] > self.budget:
+            raise OSError("Pinned shards and download scratch exceed this consumer's cache budget")
         if shutil.disk_usage(self.directory).free < shard["bytes"] + self.minimum_free:
             raise OSError("Insufficient disk space for the next verified audio shard")
         from scripts.checkpoint_transfer import download_verified_object, managed_download_client
@@ -290,6 +314,7 @@ class _ShardCache:
                     sha256=shard["sha256"],
                     timeout_seconds=self.download_timeout_seconds,
                     credential_scope="audio",
+                    check=check,
                 )
             except TimeoutError:
                 raise ShardDownloadTimeout("Audio shard read exceeded its total deadline") from None
@@ -365,6 +390,78 @@ class _ShardCache:
             return path
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _ordered_shards(cache: _ShardCache, order: list[dict], prefetch: int):
+    """Yield the exact input order with at most one verified shard in lookahead.
+
+    The executor thread stays alive until its SDK subprocess has been reaped.
+    On Linux the child's parent-death signal covers the creating thread as well
+    as worker death. Normal iterator close cancels and joins before reader-lock
+    release; no SDK writer may outlive the cache owner. Injected test stores use
+    the existing main-thread-only deadline implementation synchronously.
+    """
+    from scripts.checkpoint_transfer import managed_download_client
+
+    enabled = bool(prefetch and managed_download_client(cache.client))
+    cancelled = threading.Event()
+    executor = (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-shard") if enabled else None
+    )
+    pending = None
+
+    def check():
+        if cancelled.is_set():
+            raise RuntimeError("Audio shard prefetch cancelled")
+
+    try:
+        for index, shard in enumerate(order):
+            if pending is None:
+                path = cache.get(shard)
+            else:
+                started = time.monotonic()
+                path = pending.result()
+                pending = None
+                print(
+                    json.dumps(
+                        {
+                            "event": "audio_shard_prefetch",
+                            "phase": "ready",
+                            "sha256": shard["sha256"],
+                            "wait_seconds": round(time.monotonic() - started, 3),
+                        }
+                    ),
+                    flush=True,
+                )
+            if enabled and index + 1 < len(order):
+                following = order[index + 1]
+                combined = shard["bytes"] + (
+                    following["bytes"] if following["sha256"] != shard["sha256"] else 0
+                )
+                if combined <= cache.budget:
+                    pending = executor.submit(cache.get, following, protected=(path,), check=check)
+                    print(
+                        json.dumps(
+                            {
+                                "event": "audio_shard_prefetch",
+                                "phase": "scheduled",
+                                "sha256": following["sha256"],
+                                "total_bytes": following["bytes"],
+                            }
+                        ),
+                        flush=True,
+                    )
+                # A one-shard cache remains valid: wait until the current reader
+                # closes, then perform the next synchronous get and eviction.
+            yield shard, path
+    finally:
+        cancelled.set()
+        if pending is not None:
+            pending.cancel()
+        if executor is not None:
+            # The helper checks cancellation every 100 ms and kills/reaps its
+            # isolated SDK process. Its timeout is not reset during shutdown.
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _manifest(raw: bytes, split: str, expected: dict) -> set[str]:
@@ -545,37 +642,44 @@ class _AudioStream(IterableDataset):
                     rng.shuffle(order)
 
                 def records():
-                    for shard in order:
-                        with contextlib.closing(
-                            _audio_records(cache.get(shard), shard, self.split)
-                        ) as items:
-                            if self.split == "train":
-                                yield from items
-                            else:
-                                yield from itertools.islice(
-                                    items, shard["sample_start"], shard["sample_stop"]
-                                )
+                    with contextlib.closing(
+                        _ordered_shards(cache, order, self.config.get("shard_prefetch", 0))
+                    ) as paths:
+                        for shard, path in paths:
+                            with contextlib.closing(
+                                _audio_records(path, shard, self.split)
+                            ) as items:
+                                if self.split == "train":
+                                    yield from items
+                                else:
+                                    yield from itertools.islice(
+                                        items, shard["sample_start"], shard["sample_stop"]
+                                    )
 
-                stream = records()
-                if self.split == "train":
-                    stream = shuffle(self.config["shuffle_buffer"], rng=rng)(stream)
-                for name, raw in stream:
-                    yield _decode(
-                        raw,
-                        name,
-                        self.config["sample_rate"],
-                        self.config["num_samples"],
-                        self.config["seed"],
-                        cycle,
-                        self.split == "train" and self.config["train_random_crop"],
-                        naturalistic=naturalistic,
-                        crops_per_recording=self.config.get("masked_crops_per_recording", 0),
-                        crop_samples=self.config.get("masked_crop_samples"),
-                        clean_binaural=self.config.get("clean_binaural", False),
-                    )
-                    emitted += 1
-                    if self.quota is not None and emitted >= self.quota:
-                        return
+                with contextlib.closing(records()) as raw_records:
+                    stream = raw_records
+                    if self.split == "train":
+                        stream = shuffle(self.config["shuffle_buffer"], rng=rng)(stream)
+                    with contextlib.closing(stream):
+                        for name, raw in stream:
+                            yield _decode(
+                                raw,
+                                name,
+                                self.config["sample_rate"],
+                                self.config["num_samples"],
+                                self.config["seed"],
+                                cycle,
+                                self.split == "train" and self.config["train_random_crop"],
+                                naturalistic=naturalistic,
+                                crops_per_recording=self.config.get(
+                                    "masked_crops_per_recording", 0
+                                ),
+                                crop_samples=self.config.get("masked_crop_samples"),
+                                clean_binaural=self.config.get("clean_binaural", False),
+                            )
+                            emitted += 1
+                            if self.quota is not None and emitted >= self.quota:
+                                return
                 if self.split != "train":
                     return
                 cycle += 1
@@ -609,6 +713,7 @@ class ShardedAudioDataModule(L.LightningDataModule):
         cache_max_gib: float = 40,
         cache_min_free_gib: float = 2,
         shuffle_buffer: int = 128,
+        shard_prefetch: int = 0,
         allow_partial_index: bool = False,
         allow_stream_restart_on_resume: bool = False,
         worker_timeout_seconds: float = 180,
@@ -621,6 +726,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
         clean_to_nat_transition: dict[str, str] | None = None,
     ):
         super().__init__()
+        if type(shard_prefetch) is not int or shard_prefetch not in (0, 1):
+            raise ValueError("shard_prefetch must be 0 (off) or 1 (one shard of lookahead)")
         for key, value in {
             "sample_rate": sample_rate,
             "num_samples": num_samples,

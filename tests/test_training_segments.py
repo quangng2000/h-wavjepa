@@ -1064,8 +1064,9 @@ def test_nat_checkpoint_owner_binds_asset_manifest_and_crop_population(tmp_path)
     ):
         with pytest.raises(ValueError, match="different run"):
             repository(client, **changes).open(initialize=False)
-    with pytest.raises(ValueError, match="global batch 16"):
-        repository(client, naturalistic_manifest_sha256="b" * 64)
+    changed = repository(client, global_batch=64, naturalistic_manifest_sha256="b" * 64)
+    with pytest.raises(ValueError, match="different run"):
+        changed.open(initialize=False)
 
 
 def test_waiver_preserves_completed_corpus_gate_before_checkpoint_or_training(

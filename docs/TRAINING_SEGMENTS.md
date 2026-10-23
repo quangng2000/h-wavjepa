@@ -126,6 +126,65 @@ exit alone does not mean an open task pool has been sealed. Provider preemption,
 hardware loss, exhausted credit, or the hard runtime limit can still release
 the allocation.
 
+## Performance controls on a persistent eight-GPU node
+
+For one eight-H100 machine, the segment runner defaults to
+`--activation-checkpointing off --shard-prefetch 1`. Other layouts retain their
+existing activation-checkpointing setting. Both options can be set explicitly.
+Disabling activation checkpointing keeps intermediate activations in GPU memory
+instead of recomputing them during backpropagation. Full-state resume permits
+this execution flag to change while still rejecting changed model geometry,
+losses, masks, optimizer schedules, and data provenance.
+
+Shard prefetch downloads and verifies at most one next shard while the current
+shard is consumed. It preserves the shard and recording order, random crops,
+rank ownership, and cache budget. The active tar file is protected from eviction;
+a cache too small for both shards falls back to synchronous loading. Closing a
+reader cancels and reaps its download before releasing the cache lock. The
+`audio_shard_prefetch` events report the remaining wait when a prefetched shard
+is needed. Measure these waits alongside optimizer throughput; allocated GPU
+memory or a high utilization sample alone does not establish useful throughput.
+
+Changing the global batch is a separate recipe decision. Defaults remain 16
+binaural recordings or 64 mono recordings. `--global-batch-size` selects an
+explicit global recording batch, divisible by the rank count and with at least
+two recordings per rank. The number of binaural masked crops per update is
+eight times this value. Larger batches change both the regularizer population
+and audio exposure per optimizer update; the learning rate, absolute step
+target, and EMA schedule are not automatically rescaled.
+
+For a batch change from existing weights, use a **new run ID and empty checkpoint
+prefix**, the new batch, and `--batch-source-prefix`, `--batch-source-run-id`,
+and `--batch-source-checkpoint-sha256`. Do not also pass `--resume`. The runner
+verifies and restores the unchanged full checkpoint, including optimizer and
+EMA state, and records the source step/SHA and old/new batch in the new owner.
+The previous run remains unchanged. Later segments use ordinary `--resume`
+with the selected batch; a clean-to-Nat handoff preserves that batch. A fresh
+run may also select a batch directly without importing a checkpoint.
+
+`scripts/profile_batch_throughput.py` measures one candidate global batch
+(16, 32, 64, or 128) on eight local GPUs. Stop the production process and its
+readers first, then supply its `--source-plan`, the local full `--checkpoint`,
+`--checkpoint-sha256`, and `--resume-step`, plus `--global-batch` and a fresh
+`--output` directory. Defaults are three warm-up and twenty measured updates
+within a 360-second process-tree timeout. The profiler restores the complete
+state in memory, uses the frozen real audio stream, reports throughput and peak
+memory for all eight ranks, and discards its updates. It writes no checkpoints
+and performs no S3 publication. Repeat with fresh output directories to compare
+recordings per second, not just updates per second. These short profiles can
+benefit from cached shards and do not replace sustained streaming validation.
+
+New segment plans also contain an `operator_stop` request path and a fresh nonce.
+To pause an initialized segment, atomically write a JSON object containing
+`schema_version: 1` and that plan's exact `run_id`, `segment_id`, and `nonce` to
+the request path. All ranks stop at an optimizer boundary, save and verify their
+final full checkpoint, and run the ordinary validation lifecycle. An operator
+pause does not seal a clean run for the Nat handoff. Stale or malformed requests
+are ignored. This callback must be installed before launch; it cannot add a
+graceful stop path to an older live process. Pausing the training process does
+not release a persistent GPU node; allocation holds and spending bounds remain
+the orchestrator's responsibility.
+
 ## Required inputs and credentials
 
 - A completed staging index, stored locally with its exact SHA256. Partial
@@ -191,7 +250,7 @@ before launching. The script discovers `latest.json`, downloads the entire
 checkpoint, verifies its SHA256, and resumes through `Trainer.fit(ckpt_path=...)`.
 A completed 375,000-step checkpoint is rejected as unnecessary work.
 
-Clean mono global optimizer batch remains **64** (16 per GPU). Nat uses **16
+By default, clean mono global optimizer batch is **64** (16 per GPU). Nat uses **16
 recordings** (four per GPU), each with eight masked crops, for **128 masked
 crops** per update. Both retain the absolute
 **375,000-step** target, **100,000-step** LR warmup and existing **100,000-step**

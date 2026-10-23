@@ -1036,7 +1036,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             checkpoint[self.SCHEDULE_CHECKPOINT_KEY] = deepcopy(self._resolved_training_schedule)
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        if self.validated_checkpoint_metadata(checkpoint) != self.checkpoint_metadata():
+        saved = self.validated_checkpoint_metadata(checkpoint)
+        configured = self.checkpoint_metadata()
+        if not self.backbone.checkpoint_config_compatible(saved.pop("backbone")) or saved != {
+            key: value for key, value in configured.items() if key != "backbone"
+        }:
             raise ValueError(
                 "checkpoint model configuration mismatch; use the original dynamics configuration"
             )

@@ -233,3 +233,158 @@ def test_gate_import_does_not_load_gpu_training_dependencies():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def _change_source_batch(curriculum, batch, transition=None):
+    args, _, storage, clean, _ = curriculum
+    clean["global_batch"] = batch
+    clean["checkpoint"]["owner"]["global_batch"] = batch
+    if transition is not None:
+        clean["checkpoint"]["owner"]["batch_transition"] = transition
+    for suffix, value in (
+        ("clean-handoff.json", clean),
+        ("latest.json", clean["checkpoint"]),
+        ("owner.json", clean["checkpoint"]["owner"]),
+    ):
+        storage.objects[args.clean_prefix + "/" + suffix] = json.dumps(value).encode()
+
+
+def _batch_transition(batch):
+    return {
+        "source_run_id": "earlier-clean-001",
+        "source_prefix": "training/earlier-clean-001",
+        "source_checkpoint_sha256": "c" * 64,
+        "source_optimizer_step": 100,
+        "old_global_batch": 16,
+        "new_global_batch": batch,
+    }
+
+
+@pytest.mark.parametrize("batch", [32, 64, 128])
+def test_larger_batch_gate_preserves_recipe_change_into_nat_command(curriculum, batch):
+    args, audio, storage, _, nat = curriculum
+    transition = _batch_transition(batch)
+    _change_source_batch(curriculum, batch, transition)
+    result = gate.wait_for_curriculum(args, audio, storage)
+    assert result["source_global_batch"] == batch
+    assert result["source_batch_transition"] == transition
+    reread = gate.fetch_curriculum_handoff(
+        storage,
+        bucket=args.checkpoint_bucket,
+        ready_key=args.curriculum_ready_key,
+        source_prefix=args.clean_prefix,
+        source_run_id=args.clean_run_id,
+        index_sha256=args.index_sha256,
+        nat_bucket=args.nat_bucket,
+        nat_endpoint=args.nat_endpoint,
+        nat_ready_key=args.nat_ready_key,
+        nat_receipt=nat,
+    )
+    assert reread == result
+    command = segment_command(
+        ["--nproc-per-node", "8"],
+        manifest_path=args.nat_manifest_path,
+        manifest_sha256=nat["manifest"]["sha256"],
+        endpoint=args.nat_endpoint,
+        curriculum=reread,
+    )
+    assert command[command.index("--global-batch-size") + 1] == str(batch)
+    assert command[command.index("--curriculum-source-checkpoint-sha256") + 1] == "b" * 64
+    assert "--nat" in command
+
+
+@pytest.mark.parametrize("batch", [True, 0, 3, 16.0, "32"])
+def test_clean_gate_rejects_invalid_source_population(curriculum, batch):
+    _change_source_batch(curriculum, batch)
+    args, audio, storage, _, _ = curriculum
+    with pytest.raises(ValueError, match="global batch"):
+        gate.wait_for_curriculum(args, audio, storage)
+    assert not storage.puts
+
+
+@pytest.mark.parametrize("damage", ["new_batch", "same_batch", "step", "sha", "prefix", "extra"])
+def test_clean_gate_rejects_invalid_batch_transition_provenance(curriculum, damage):
+    transition = _batch_transition(32)
+    if damage == "new_batch":
+        transition["new_global_batch"] = 64
+    elif damage == "same_batch":
+        transition["old_global_batch"] = 32
+    elif damage == "step":
+        transition["source_optimizer_step"] = 123
+    elif damage == "sha":
+        transition["source_checkpoint_sha256"] = "invalid"
+    elif damage == "prefix":
+        transition["source_prefix"] = "../training/earlier-clean-001"
+    else:
+        transition["unexpected"] = True
+    _change_source_batch(curriculum, 32, transition)
+    args, audio, storage, _, _ = curriculum
+    with pytest.raises(ValueError, match="batch transition"):
+        gate.wait_for_curriculum(args, audio, storage)
+    assert not storage.puts
+
+
+def test_gate_dynamic_batch_cannot_be_overridden_by_nat_segment_arguments(curriculum):
+    args, audio, storage, _, nat = curriculum
+    _change_source_batch(curriculum, 64, _batch_transition(64))
+    result = gate.wait_for_curriculum(args, audio, storage)
+    for arguments in (["--global-batch-size", "16"], ["--global-batch-size=16"]):
+        with pytest.raises(ValueError, match="override"):
+            segment_command(
+                arguments,
+                manifest_path=args.nat_manifest_path,
+                manifest_sha256=nat["manifest"]["sha256"],
+                endpoint=args.nat_endpoint,
+                curriculum=result,
+            )
+
+
+def test_gpu_gate_rejects_population_or_provenance_changed_after_publication(curriculum):
+    args, audio, storage, _, nat = curriculum
+    _change_source_batch(curriculum, 64, _batch_transition(64))
+    original = gate.wait_for_curriculum(args, audio, storage)
+    for field, value in (("source_global_batch", 32), ("source_batch_transition", None)):
+        changed = deepcopy(original)
+        changed[field] = value
+        storage.objects[args.curriculum_ready_key] = json.dumps(changed).encode()
+        with pytest.raises(ValueError, match="changed after"):
+            gate.fetch_curriculum_handoff(
+                storage,
+                bucket=args.checkpoint_bucket,
+                ready_key=args.curriculum_ready_key,
+                source_prefix=args.clean_prefix,
+                source_run_id=args.clean_run_id,
+                index_sha256=args.index_sha256,
+                nat_bucket=args.nat_bucket,
+                nat_endpoint=args.nat_endpoint,
+                nat_ready_key=args.nat_ready_key,
+                nat_receipt=nat,
+            )
+
+
+def test_legacy_batch16_gate_remains_compatible(curriculum):
+    args, audio, storage, _, nat = curriculum
+    receipt = gate.wait_for_curriculum(args, audio, storage)
+    receipt.pop("source_global_batch")
+    receipt.pop("source_batch_transition")
+    storage.objects[args.curriculum_ready_key] = json.dumps(receipt).encode()
+    actual = gate.fetch_curriculum_handoff(
+        storage,
+        bucket=args.checkpoint_bucket,
+        ready_key=args.curriculum_ready_key,
+        source_prefix=args.clean_prefix,
+        source_run_id=args.clean_run_id,
+        index_sha256=args.index_sha256,
+        nat_bucket=args.nat_bucket,
+        nat_endpoint=args.nat_endpoint,
+        nat_ready_key=args.nat_ready_key,
+        nat_receipt=nat,
+    )
+    command = segment_command(
+        [],
+        manifest_path=args.nat_manifest_path,
+        manifest_sha256=nat["manifest"]["sha256"],
+        endpoint=args.nat_endpoint,
+        curriculum=actual,
+    )
+    assert command[command.index("--global-batch-size") + 1] == "16"
