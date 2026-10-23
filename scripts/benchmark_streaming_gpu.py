@@ -36,6 +36,14 @@ sys.path.insert(0, str(ROOT))
 from scripts.benchmark_gpu import atomic_report  # noqa: E402
 
 
+def worker_facts(loader) -> dict:
+    context = loader.multiprocessing_context
+    method = context.get_start_method() if context is not None else None
+    if loader.num_workers < 1 or method != "spawn":
+        raise RuntimeError("The distributed streaming probe requires spawned input workers")
+    return {"workers_per_rank": loader.num_workers, "data_worker_start_method": method}
+
+
 def _cache_inventory(directory: Path, rank: int) -> dict:
     paths = list(directory.glob(f"train/rank-{rank}/*/*.tar"))
     sizes = []
@@ -142,6 +150,7 @@ class StreamingTimings(L.Callback):
         self.validation_batches += 1
 
     def on_train_start(self, trainer, pl_module):
+        self.worker_facts = worker_facts(trainer.train_dataloader)
         torch.cuda.synchronize()
         self.wall_started = time.perf_counter()
         self.initial = next(pl_module.backbone.model.encoder.parameters()).detach().clone()
@@ -180,6 +189,7 @@ class StreamingTimings(L.Callback):
         end_cache = _cache_inventory(self.cache, trainer.global_rank)
         refills = end_cache["verified_files"] > self.warm_cache["verified_files"]
         report = {
+            **self.worker_facts,
             "rank": trainer.global_rank,
             "world_size": trainer.world_size,
             "global_batch": 64,
@@ -255,6 +265,12 @@ def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
         if not train.get("online_weights_changed") or not train.get("all_model_parameters_finite"):
             raise RuntimeError("A rank did not prove finite parameter updates")
         if (
+            train.get("data_worker_start_method") != "spawn"
+            or train.get("workers_per_rank", 0) < 1
+            or train.get("workers_per_rank") != ranks[0].get("workers_per_rank")
+        ):
+            raise RuntimeError("Every rank must prove the same spawned input-worker setup")
+        if (
             not train.get("cache_refills_observed_after_warmup")
             or train["rank_cache_at_train_end"]["verified_files"]
             <= train["rank_cache_at_warmup"]["verified_files"]
@@ -276,6 +292,8 @@ def summarize(output: Path, devices: int, steps: int, frozen: dict) -> dict:
         raise RuntimeError("Checkpoint roundtrip evidence is missing")
     return {
         "ok": True,
+        "data_worker_start_method": "spawn",
+        "workers_per_rank": ranks[0]["workers_per_rank"],
         "input": "private S3 streaming from a frozen index",
         "frozen_index": frozen,
         "ranks": ranks,

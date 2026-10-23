@@ -440,6 +440,10 @@ class WAVManifestDataModule(L.LightningDataModule):
             "persistent_workers": self.hparams.persistent_workers,
             "prefetch_factor": self.hparams.prefetch_factor,
         }
+        if self.hparams.num_workers:
+            # CUDA/NCCL may already be initialized; inherited fork state is unsafe.
+            # Epochs travel in sampler indices, so no cross-context shared locks are needed.
+            options["multiprocessing_context"] = "spawn"
         world_size = self.trainer.world_size if self.trainer is not None else 1
         rank = self.trainer.global_rank if self.trainer is not None else 0
         drop_last = shuffle and self.hparams.train_drop_last

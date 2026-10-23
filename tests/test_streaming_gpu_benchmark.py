@@ -13,8 +13,19 @@ from scripts.benchmark_streaming_gpu import (
     make_config,
     summarize,
     verify_checkpoint,
+    worker_facts,
 )
 from src.utils.runtime import validate_config
+
+
+def test_worker_evidence_reads_actual_loader_context():
+    loader = DataLoader([1, 2], num_workers=1, multiprocessing_context="spawn")
+    assert worker_facts(loader) == {
+        "data_worker_start_method": "spawn",
+        "workers_per_rank": 1,
+    }
+    with pytest.raises(RuntimeError, match="spawned input workers"):
+        worker_facts(DataLoader([1, 2], num_workers=1))
 
 
 @pytest.mark.parametrize("devices", [2, 4])
@@ -104,6 +115,8 @@ def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_pa
                 {
                     **identity,
                     "online_weights_changed": True,
+                    "data_worker_start_method": "spawn",
+                    "workers_per_rank": 1,
                     "all_model_parameters_finite": True,
                     "cache_refills_observed_after_warmup": True,
                     "rank_cache_at_warmup": {"verified_files": 1},
@@ -131,6 +144,12 @@ def test_summary_requires_matching_all_rank_training_validation_and_index(tmp_pa
     no_refill["rank_cache_at_train_end"]["verified_files"] = 1
     train_path.write_text(json.dumps(no_refill))
     with pytest.raises(RuntimeError, match="additional verified shard downloads"):
+        summarize(tmp_path, 2, 400, frozen)
+    train_path.write_text(original_train)
+    wrong_workers = json.loads(original_train)
+    wrong_workers["data_worker_start_method"] = "fork"
+    train_path.write_text(json.dumps(wrong_workers))
+    with pytest.raises(RuntimeError, match="spawned input-worker"):
         summarize(tmp_path, 2, 400, frozen)
     train_path.write_text(original_train)
     damaged = json.loads((tmp_path / "validation-rank-1.json").read_text())

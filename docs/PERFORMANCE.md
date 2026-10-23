@@ -2,15 +2,45 @@
 
 Keep the experiment fixed when comparing speed: global batch **64**, nine
 1.01-second windows per recording, the full WavJEPA base, pointwise hierarchy,
-LocaLeReg, gradient clipping, and the original **375,000-update** LR/EMA schedule.
+LocaLeReg, gradient clipping, the **375,000-update** LR schedule, 100,000-update
+LR warmup, and the existing 100,000-update EMA ramp.
 These changes reduce execution overhead; they do not establish representation
 quality or turn the pointwise baseline into temporal aggregation.
+
+## Measured local-audio throughput
+
+On H100 80 GB GPUs, PyTorch 2.13.0 / CUDA 12.6 / Lightning 2.6.6:
+
+| Configuration | Updates/s | Peak allocated memory/GPU | 375k training hours | Training GPU cost |
+| --- | ---: | ---: | ---: | ---: |
+| Two GPUs, dense with checkpointing | 1.467 | 29.4 GiB | 71.0 | $537 |
+| Two GPUs, compact without checkpointing | 1.944 | 42.3 GiB | 53.6 | $405 |
+| Four GPUs, compact without checkpointing | 2.747 | 23.0 GiB | 37.9 | $573 |
+
+Each result measures 200 complete optimizer updates after 25 warmup updates on
+the verified AudioSet pilot. All ranks completed 225 optimizer and EMA updates,
+with changed online weights and full checkpoints. The two-GPU compact path was
+32.5% faster than this dense/checkpointed control, which already includes the
+other runtime optimizations. [Raw results and receipt](validation/h100-performance-2026-10-22.json).
+
+Costs use the observed standard batch rate of $0.063/GPU-minute. They exclude
+remote input, validation, checkpoint upload and interruptions. Adding an assumed
+15% runtime margin gives roughly **61.6 hours / $466** on two GPUs or
+**43.6 hours / $659** on four. This margin is a planning assumption, not measured
+full-run overhead. Calendar discounts are not included.
+
+The initial live streaming probe was stopped during startup. Its input workers
+used the unsafe Linux fork-after-NCCL combination. Both loaders now explicitly
+spawn worker processes; corrected live streaming validation is required before
+these compute projections qualify a full training run.
 
 ## Available controls
 
 `experiment=audioset_h100_fast` uses two GPUs and 32 recordings per rank;
 `experiment=audioset_h100_four` uses four GPUs and 16 recordings per rank.
-Both gather the same 64-recording population for regularization.
+Both gather the same 64-recording population for regularization and select the
+measured compact path without gradient checkpointing, with two workers per rank.
+The streaming probe uses one worker per rank and measures input separately.
 
 - Finite-gradient checks reduce their flags on the GPU before one host check per
   device. Nonfinite gradients still abort the optimizer and EMA update.
@@ -24,9 +54,10 @@ Both gather the same 64-recording population for regularization.
   target-mask positions before the official Transformers, then restores original
   positions. The dense teacher is unchanged. This requires zero dropout and is
   mathematically equivalent on retained positions, with normal floating-point
-  reduction differences. The default remains the dense path.
+  reduction differences. The original presets retain the dense path.
 - `model.backbone.config.use_gradient_checkpointing=false` removes activation
-  recomputation when GPU memory permits. Measure peak memory before choosing it.
+  recomputation. The measured fast presets use this setting; the original
+  two-H100 preset retains checkpointing for lower memory use.
 - Persistent input workers prefetch batches. For stored shards, follow the
   [WebDataset input guide](SHARDED_AUDIO.md) and benchmark cold cache refills.
 

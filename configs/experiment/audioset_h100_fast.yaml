@@ -3,13 +3,18 @@ defaults:
   - audioset_h100
   - _self_
 
-# Candidate for a sustained real-data benchmark, not a measured speed claim.
+# Verified with 225 optimizer updates on a real AudioSet pilot on H100 SXM GPUs.
 # The loss, regularizer population (64), readout and schedule are unchanged.
-tags: [audioset, pointwise-hierarchy, two-h100, localereg, performance-candidate]
+tags: [audioset, pointwise-hierarchy, two-h100, localereg, performance-measured]
 data:
+  num_workers: 2
   persistent_workers: true
   prefetch_factor: 2
 model:
+  backbone:
+    config:
+      compact_masked_tokens: true
+      use_gradient_checkpointing: false
   optimizer:
     # Lightning mixed precision rejects fused AdamW with gradient clipping.
     # Keep the inherited clip norm and use the supported optimizer path.

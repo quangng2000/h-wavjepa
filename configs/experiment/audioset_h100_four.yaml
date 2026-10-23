@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 # Keep the optimizer and regularizer population at 64 recordings, not 128.
-tags: [audioset, pointwise-hierarchy, four-h100, localereg, performance-candidate]
+tags: [audioset, pointwise-hierarchy, four-h100, localereg, performance-measured]
 data:
   batch_size: 16
 trainer:

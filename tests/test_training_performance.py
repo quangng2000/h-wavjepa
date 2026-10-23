@@ -79,16 +79,31 @@ def test_performance_presets_preserve_research_configuration(make_config, experi
     assert candidate.trainer.devices == devices
     assert candidate.data.batch_size * devices == 64
     assert candidate.trainer.max_steps == candidate.model.lr_total_steps == 375000
+    assert candidate.model.lr_warmup_steps == candidate.model.ema_anneal_end_step == 100000
+    assert candidate.trainer.get("accumulate_grad_batches", 1) == 1
+    assert candidate.trainer.gradient_clip_val == 1.0
+    assert candidate.trainer.precision == "bf16-mixed"
     original_model = OmegaConf.to_container(baseline.model, resolve=True)
     candidate_model = OmegaConf.to_container(candidate.model, resolve=True)
+    # Only execution controls differ: preserve the full architecture/objective.
+    original_backbone = original_model["backbone"]["config"]
+    candidate_backbone = candidate_model["backbone"]["config"]
+    assert original_backbone["compact_masked_tokens"] is False
+    assert original_backbone["use_gradient_checkpointing"] is True
+    assert candidate_backbone["compact_masked_tokens"] is True
+    assert candidate_backbone["use_gradient_checkpointing"] is False
+    for control in ("compact_masked_tokens", "use_gradient_checkpointing"):
+        candidate_backbone[control] = original_backbone[control]
     assert candidate_model.pop("training_metric_interval") == 50
     assert candidate_model["localereg_fixed_shape_kmeans"] is True
     candidate_model["localereg_fixed_shape_kmeans"] = False
     assert candidate_model["optimizer"].pop("fused") is False
+    assert candidate_model["optimizer"]["_target_"] == "torch.optim.AdamW"
     assert candidate_model == original_model
     assert candidate.trainer.strategy == baseline.trainer.strategy
     assert candidate.data.require_full_length
     assert candidate.data.train_random_crop and candidate.data.train_drop_last
+    assert candidate.data.num_workers == 2
     assert candidate.data.persistent_workers and candidate.data.prefetch_factor == 2
 
 

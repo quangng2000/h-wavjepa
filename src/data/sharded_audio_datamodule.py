@@ -586,7 +586,12 @@ class ShardedAudioDataModule(L.LightningDataModule):
         workers = self.hparams.num_workers if split == "train" else 0
         kwargs = {}
         if workers:
-            kwargs.update(persistent_workers=self.hparams.persistent_workers)
+            # NCCL/CUDA are initialized before Lightning starts these workers.
+            # Spawn also keeps boto3 clients and their connection pools worker-local.
+            kwargs.update(
+                persistent_workers=self.hparams.persistent_workers,
+                multiprocessing_context="spawn",
+            )
             if self.hparams.prefetch_factor is not None:
                 kwargs["prefetch_factor"] = self.hparams.prefetch_factor
         return DataLoader(

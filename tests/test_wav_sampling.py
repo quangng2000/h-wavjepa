@@ -160,13 +160,56 @@ def test_epoch_crops_reproduce_across_worker_counts_and_change_between_epochs(tm
     assert any(not torch.equal(a, b) for a, b in zip(first, second, strict=True))
     sampler = _EpochDistributedSampler(dataset, num_replicas=1, rank=0, shuffle=False)
     loader = DataLoader(
-        dataset, batch_size=4, sampler=sampler, num_workers=1, persistent_workers=True
+        dataset,
+        batch_size=4,
+        sampler=sampler,
+        num_workers=1,
+        persistent_workers=True,
+        multiprocessing_context="spawn",
     )
-    torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(first))
-    _set_sampler_epoch(loader, 1)
-    torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(second))
-    _set_sampler_epoch(loader, 0)
-    torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(first))
+    try:
+        torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(first))
+        _set_sampler_epoch(loader, 1)
+        torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(second))
+        _set_sampler_epoch(loader, 0)
+        torch.testing.assert_close(next(iter(loader))["waveform"], torch.stack(first))
+    finally:
+        loader._iterator._shutdown_workers()
+
+
+@pytest.mark.parametrize("workers", [0, 1])
+def test_datamodule_worker_context_and_epoch_crops(tmp_path, workers):
+    module = WAVManifestDataModule(
+        **_manifests(tmp_path, 4),
+        num_samples=16,
+        batch_size=2,
+        minimum_batch_size=2,
+        num_workers=workers,
+        persistent_workers=bool(workers),
+        train_random_crop=True,
+        seed=42,
+    )
+    module.setup()
+    for loader in (module.train_dataloader(), module.val_dataloader(), module.test_dataloader()):
+        if workers:
+            assert loader.multiprocessing_context.get_start_method() == "spawn"
+        else:
+            assert loader.multiprocessing_context is None
+        try:
+            for epoch in (0, 1, 0):
+                _set_sampler_epoch(loader, epoch)
+                expected = torch.stack(
+                    [
+                        loader.dataset[index]["waveform"]
+                        for batch in loader.batch_sampler
+                        for index in batch
+                    ]
+                )
+                actual = torch.cat([batch["waveform"] for batch in loader])
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        finally:
+            if workers:
+                loader._iterator._shutdown_workers()
 
 
 def test_datamodule_sets_epoch_in_custom_batch_sampler_and_keeps_eval_fixed(tmp_path):

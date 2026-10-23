@@ -1,0 +1,257 @@
+{
+  "measured_at_utc": "2026-10-23T01:27:27Z",
+  "code_commit": "846b0db97aaf00bc4edcea311eefedd4f03e686e",
+  "job_id": "job-k48rx",
+  "method": {
+    "global_batch": 64,
+    "optimizer_steps_per_variant": 225,
+    "warmup_updates": 25,
+    "measured_updates": 200,
+    "architecture": "pointwise hierarchy with full official WavJEPA base",
+    "precision": "bf16-mixed",
+    "optimizer": "ordinary AdamW",
+    "gradient_clip_norm": 1,
+    "lr_total_steps": 375000,
+    "lr_warmup_steps": 100000,
+    "ema_anneal_end_step": 100000
+  },
+  "hardware": {
+    "cuda": "12.6",
+    "devices": [
+      "NVIDIA H100 80GB HBM3",
+      "NVIDIA H100 80GB HBM3",
+      "NVIDIA H100 80GB HBM3",
+      "NVIDIA H100 80GB HBM3"
+    ],
+    "torch": "2.13.0+cu126"
+  },
+  "limitations": [
+    "Small real AudioSet pilot reused across epochs; remote cache misses excluded.",
+    "Validation, checkpoint upload and queue time are outside steady-state timing.",
+    "This measures speed and finite updates, not convergence or HEAR quality."
+  ],
+  "ok": true,
+  "variants": [
+    {
+      "checkpoint": {
+        "bytes": 2217787498,
+        "seconds": 5.390680726035498
+      },
+      "projected_375k_train_hours": 37.91836006197021,
+      "ranks": [
+        {
+          "allocated_peak_gib": 23.036815643310547,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.3639056432250072,
+          "measured_seconds": 72.78112864500144,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.3489854255167302,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.3962224340066314,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 0,
+          "reserved_peak_gib": 24.048828125,
+          "variant": "compact_4",
+          "warmup_steps": 25,
+          "world_size": 4
+        },
+        {
+          "allocated_peak_gib": 23.036815643310547,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.3640066252250108,
+          "measured_seconds": 72.80132504500216,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.3490507820097264,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.3922556749894284,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 1,
+          "reserved_peak_gib": 24.048828125,
+          "variant": "compact_4",
+          "warmup_steps": 25,
+          "world_size": 4
+        },
+        {
+          "allocated_peak_gib": 23.036815643310547,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.364016256594914,
+          "measured_seconds": 72.8032513189828,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.34918925652164035,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.39285268797539175,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 2,
+          "reserved_peak_gib": 24.048828125,
+          "variant": "compact_4",
+          "warmup_steps": 25,
+          "world_size": 4
+        },
+        {
+          "allocated_peak_gib": 23.036815643310547,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.3640003023648751,
+          "measured_seconds": 72.80006047297502,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.3491323070193175,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.39235607598675415,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 3,
+          "reserved_peak_gib": 24.048828125,
+          "variant": "compact_4",
+          "warmup_steps": 25,
+          "world_size": 4
+        }
+      ],
+      "returncode": 0,
+      "seconds_per_update": 0.364016256594914,
+      "standard_batch_gpu_cost_usd": 573.3256041369896,
+      "timed_out": false,
+      "updates_per_second": 2.747130057745811,
+      "variant": "compact_4",
+      "wall_seconds": 104.33711933199083
+    },
+    {
+      "checkpoint": {
+        "bytes": 2217787498,
+        "seconds": 5.198843611986376
+      },
+      "projected_375k_train_hours": 53.581922831259966,
+      "ranks": [
+        {
+          "allocated_peak_gib": 42.258137702941895,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.5143713120999746,
+          "measured_seconds": 102.87426241999492,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.4932175090070814,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.5628566559753381,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 0,
+          "reserved_peak_gib": 45.224609375,
+          "variant": "compact_2",
+          "warmup_steps": 25,
+          "world_size": 2
+        },
+        {
+          "allocated_peak_gib": 42.258137702941895,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.5143864591800957,
+          "measured_seconds": 102.87729183601914,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.49377746097161435,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.5500103780068457,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 1,
+          "reserved_peak_gib": 45.224609375,
+          "variant": "compact_2",
+          "warmup_steps": 25,
+          "world_size": 2
+        }
+      ],
+      "returncode": 0,
+      "seconds_per_update": 0.5143864591800957,
+      "standard_batch_gpu_cost_usd": 405.07933660432536,
+      "timed_out": false,
+      "updates_per_second": 1.944063616281708,
+      "variant": "compact_2",
+      "wall_seconds": 136.22066467202967
+    },
+    {
+      "checkpoint": {
+        "bytes": 2217787498,
+        "seconds": 5.298004022042733
+      },
+      "projected_375k_train_hours": 71.00503473905822,
+      "ranks": [
+        {
+          "allocated_peak_gib": 29.411010265350345,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.6816483334949589,
+          "measured_seconds": 136.3296666989918,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.6457956615195144,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.8541724820388481,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 0,
+          "reserved_peak_gib": 33.337890625,
+          "variant": "dense_checkpointed_2",
+          "warmup_steps": 25,
+          "world_size": 2
+        },
+        {
+          "allocated_peak_gib": 29.411010265350345,
+          "ema_updates": 225,
+          "global_batch": 64,
+          "input": "verified AudioSet pilot on local disk; real WAV reads and epoch crops",
+          "mean_seconds_per_update": 0.6816078135801945,
+          "measured_seconds": 136.3215627160389,
+          "measured_steps": 200,
+          "median_seconds_per_update": 0.6457052000041585,
+          "online_weights_changed": true,
+          "optimizer_steps": 225,
+          "p95_seconds_per_update": 0.8408483130042441,
+          "pilot_sha256": "645f2327738ce0e0fec6a192bd05f2f8e806003e2865b64030037299ac646572",
+          "rank": 1,
+          "reserved_peak_gib": 33.337890625,
+          "variant": "dense_checkpointed_2",
+          "warmup_steps": 25,
+          "world_size": 2
+        }
+      ],
+      "returncode": 0,
+      "seconds_per_update": 0.6816483334949589,
+      "standard_batch_gpu_cost_usd": 536.7980626272802,
+      "timed_out": false,
+      "updates_per_second": 1.4670321203204342,
+      "variant": "dense_checkpointed_2",
+      "wall_seconds": 174.1806056139758
+    }
+  ],
+  "receipt": {
+    "attempts": [
+      {
+        "attempt": 1,
+        "billed_seconds": 429,
+        "charged_usd_micros": 1801800,
+        "gpu_count": 4,
+        "rate_usd_micros_per_gpu_minute": 63000
+      }
+    ],
+    "billed_attempts": 1,
+    "billed_seconds": 429,
+    "charged_usd_micros": 1801800,
+    "image_digest": "sha256:7f12384e6e1f989d360019ec1133bb15978e8443d22c5df9cec08ed957a1108f"
+  },
+  "artifact": {
+    "id": "art-vthfe",
+    "sha256": "b2a9854443637d4b4268bf38a12dd665b2732a1dcbc1c56f3fe26d8fca7e1492"
+  },
+  "comparison_note": "The dense/checkpointed control already includes fixed-shape LocaLeReg, sampled diagnostics and reduced finite-gradient synchronization. It does not measure the full optimization against the original unoptimized implementation.",
+  "planning_note": "Costs use the observed standard batch rate of $0.063 per GPU-minute. Calendar discounts, validation, remote cache misses, checkpoint upload, queueing and preemption are not included. A 15% margin is a planning assumption, not a measurement."
+}

@@ -59,7 +59,7 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 | --- | --- |
 | `audioset` | Pointwise hierarchy, random initialization, one-device FP32 |
 | `audioset_h100` | Same AudioSet experiment configured for two H100s |
-| `audioset_h100_fast` / `audioset_h100_four` | Performance candidates on two/four H100s, keeping global batch 64 |
+| `audioset_h100_fast` / `audioset_h100_four` | Measured compact-token presets on two/four H100s, keeping global batch 64 |
 | `audioset_pretrained` | AudioSet hierarchy initialized from released WavJEPA weights |
 | `audioset_flat` | Matched horizons and strides, upper maps replaced by identities |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |
