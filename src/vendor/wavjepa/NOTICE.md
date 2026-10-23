@@ -80,3 +80,22 @@ samples (1.01 seconds, 100 tokens), an explicit adaptation of the released
 Token readout exposes contextual encoder output before averaging.
 Its nominal centers follow the convolution strides and receptive fields; its
 context remains the entire completed window, not only that convolution support.
+
+## Optional masked-token compaction
+
+`compact_masked_tokens: true` gathers visible positions before the student
+encoder and each target-conditioned decoder, pads only to the longest visible
+row in the current batch, and scatters results back to their original positions.
+The positional embeddings are added before gathering. Masked keys cannot affect
+visible queries, and discarded query outputs do not enter the masked loss, so
+this preserves the zero-dropout objective while avoiding unused query work.
+The dense teacher traversal, all learned weights, and state-dict names remain
+unchanged. Both traversals use the original PyTorch Transformer modules (which
+already use scaled-dot-product attention when attention weights are not needed).
+
+The flag defaults to false for previous configurations. Compaction does not
+promise bitwise agreement: attention reductions can change floating-point order.
+Training with nonzero dropout is rejected because packing would change dropout
+sampling. Tests compare visible predictions, teacher targets, losses, all
+parameter gradients, checkpointing, BF16 loss behavior, and checkpoint loading
+against the dense path. CPU correctness does not establish an H100 speedup.

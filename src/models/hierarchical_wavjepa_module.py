@@ -29,6 +29,7 @@ from src.objectives.localereg import SOURCE_COMMIT as LOCALEREG_COMMIT
 from src.objectives.localereg import LocaLeReg
 from src.objectives.sigreg import SOURCE_COMMIT as SIGREG_COMMIT
 from src.objectives.sigreg import SIGReg
+from src.utils.runtime import require_finite_gradients
 
 
 class HierarchicalWavJEPAModule(L.LightningModule):
@@ -58,6 +59,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "localereg_min_cluster_size": 4,
         "localereg_kmeans_iters": 10,
         "localereg_n_quad": 256,
+        "localereg_fixed_shape_kmeans": False,
         "readout_mode": "legacy",
     }
 
@@ -88,9 +90,20 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         localereg_min_cluster_size: int = 4,
         localereg_kmeans_iters: int = 10,
         localereg_n_quad: int = 256,
+        localereg_fixed_shape_kmeans: bool = False,
         readout_mode: str = "legacy",
+        training_metric_interval: int = 1,
     ) -> None:
         super().__init__()
+        if type(training_metric_interval) is not int or training_metric_interval < 1:
+            raise ValueError("training_metric_interval must be a positive integer")
+        # This changes observation frequency, not the loss, optimizer or model
+        # state. Keep it out of construction metadata so a checkpoint can resume
+        # with a different logging cadence without changing its research setup.
+        self.training_metric_interval = training_metric_interval
+        self._initial_training_step = 0
+        if type(localereg_fixed_shape_kmeans) is not bool:
+            raise ValueError("localereg_fixed_shape_kmeans must be boolean")
         if readout_mode not in {"legacy", "normalized_top_k"}:
             raise ValueError("readout_mode must be legacy or normalized_top_k")
         self.readout_mode = readout_mode
@@ -197,6 +210,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                 min_cluster_size=localereg_min_cluster_size,
                 kmeans_iters=localereg_kmeans_iters,
                 n_quad=localereg_n_quad,
+                fixed_shape_kmeans=localereg_fixed_shape_kmeans,
             )
             if regularizer_kind == "localereg"
             else SIGReg(num_proj=sigreg_projections)
@@ -221,6 +235,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "localereg_min_cluster_size": localereg_min_cluster_size,
             "localereg_kmeans_iters": localereg_kmeans_iters,
             "localereg_n_quad": localereg_n_quad,
+            "localereg_fixed_shape_kmeans": localereg_fixed_shape_kmeans,
             "readout_mode": readout_mode,
             "lr_schedule": lr_schedule,
             "lr_warmup_steps": lr_warmup_steps,
@@ -229,6 +244,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "ema_anneal_end_step": ema_anneal_end_step,
         }
         self.save_hyperparameters(deepcopy(self.config))
+        self.save_hyperparameters({"training_metric_interval": training_metric_interval})
 
     def setup(self, stage: str) -> None:
         if str(self.trainer.precision) not in {"32", "32-true", "bf16-mixed"}:
@@ -245,6 +261,9 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         return self
 
     def on_train_start(self) -> None:
+        # Always observe the first optimizer step of a run, including resumes
+        # that stop before the next periodic diagnostic interval.
+        self._initial_training_step = getattr(self._trainer, "global_step", 0)
         if self.config["lr_schedule"] == "cosine":
             total = self._resolve_training_schedule()["total_steps"]
             if self.trainer.estimated_stepping_batches > total:
@@ -431,6 +450,16 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     def _shared_step(self, batch: dict[str, Tensor], stage: str, batch_idx: int) -> Tensor:
         seed = None if stage == "train" else (self.eval_seed + batch_idx) % 2**32
         result = self.compute_loss(batch["waveform"], seed=seed)
+        if (
+            stage == "train"
+            and self.global_step != self._initial_training_step
+            and (self.global_step + 1) % self.training_metric_interval
+        ):
+            # Lightning's log_every_n_steps only throttles logger output; it does
+            # not suppress self.log(sync_dist=True) collectives. Sample training
+            # diagnostics explicitly. Epoch training means then describe these
+            # sampled batches; validation/test still include every batch.
+            return result["loss"]
         kwargs = dict(
             on_step=stage == "train",
             on_epoch=True,
@@ -463,12 +492,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         return self._shared_step(batch, "test", batch_idx)
 
     def on_before_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
-        for group in optimizer.param_groups:
-            for parameter in group["params"]:
-                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-                    raise FloatingPointError(
-                        "non-finite gradient; optimizer and EMA update aborted"
-                    )
+        require_finite_gradients(optimizer)
 
     @torch.no_grad()
     def update_teacher(self) -> None:
@@ -598,6 +622,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         except (TypeError, ValueError) as error:
             raise ValueError("checkpoint metadata must contain finite plain data") from error
         normalized = deepcopy(metadata)
+        normalized["backbone"].setdefault("compact_masked_tokens", False)
         normalized["dynamics"] = cls.OPTIONAL_CONFIG_DEFAULTS | normalized["dynamics"]
         if normalized["dynamics"]["regularizer_kind"] != (
             "localereg" if is_local else "sigreg"

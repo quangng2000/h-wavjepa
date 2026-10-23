@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "average_top_k_layers": 8,
     "compile_modules": False,
     "use_gradient_checkpointing": False,
+    "compact_masked_tokens": False,
     "masker": {
         "target_masks_per_context": 4,
         "context_mask_prob": 0.65,
@@ -93,7 +94,13 @@ class WavJEPABackbone(nn.Module):
         if pretrained and any(
             cfg[key] != DEFAULT_CONFIG[key]
             for key in DEFAULT_CONFIG
-            if key not in {"masker", "window_samples", "use_gradient_checkpointing"}
+            if key
+            not in {
+                "masker",
+                "window_samples",
+                "use_gradient_checkpointing",
+                "compact_masked_tokens",
+            }
         ):
             raise ValueError("official pretrained base requires the default backbone architecture")
         extractor = ConvFeatureExtractor(
@@ -122,6 +129,7 @@ class WavJEPABackbone(nn.Module):
             nr_samples_per_audio=1,
             compile_modules=False,
             use_gradient_checkpointing=cfg["use_gradient_checkpointing"],
+            compact_masked_tokens=cfg["compact_masked_tokens"],
         )
         self.masker = TimeInverseBlockMasker(**cfg["masker"])
         if checkpoint_path is not None:
@@ -163,6 +171,8 @@ class WavJEPABackbone(nn.Module):
             raise ValueError("compile_modules is unsupported")
         if type(cfg["use_gradient_checkpointing"]) is not bool:
             raise ValueError("use_gradient_checkpointing must be boolean")
+        if type(cfg["compact_masked_tokens"]) is not bool:
+            raise ValueError("compact_masked_tokens must be boolean")
         if not math.isfinite(cfg["mlp_ratio"]) or cfg["mlp_ratio"] < 1:
             raise ValueError("mlp_ratio must be finite and at least one")
         patches = cfg["window_samples"]
@@ -372,7 +382,13 @@ class WavJEPABackbone(nn.Module):
         if any(
             self.config[key] != DEFAULT_CONFIG[key]
             for key in DEFAULT_CONFIG
-            if key not in {"masker", "window_samples", "use_gradient_checkpointing"}
+            if key
+            not in {
+                "masker",
+                "window_samples",
+                "use_gradient_checkpointing",
+                "compact_masked_tokens",
+            }
         ):
             raise ValueError(
                 "positional adaptation requires the official base learned architecture"

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import tempfile
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -12,6 +13,26 @@ from pathlib import Path
 import torch
 from lightning_utilities.core.rank_zero import rank_zero_only
 from omegaconf import DictConfig, OmegaConf
+
+
+def require_finite_gradients(optimizer: torch.optim.Optimizer) -> None:
+    """Reject nonfinite gradients with one host synchronization per device.
+
+    Testing each CUDA parameter in a Python conditional serializes the host with
+    hundreds of kernels. Reduce the per-parameter flags on device first. Unlike
+    using a gradient norm, this cannot reject large but finite gradients because
+    the norm overflows. Sparse gradients are checked without densifying them.
+    """
+    flags = defaultdict(list)
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            gradient = parameter.grad
+            if gradient is not None:
+                values = gradient._values() if gradient.is_sparse else gradient
+                flags[gradient.device].append(torch.isfinite(values).all())
+    for device_flags in flags.values():
+        if not torch.stack(device_flags).all():
+            raise FloatingPointError("non-finite gradient; optimizer and EMA update aborted")
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -54,6 +75,18 @@ def model_config_for_checkpoint(cfg: DictConfig) -> DictConfig:
 
 def validate_config(cfg: DictConfig) -> None:
     """Fail before model allocation for incompatible audio/masking settings."""
+    optimizer = cfg.model.get("optimizer")
+    if (
+        isinstance(optimizer, DictConfig)
+        and optimizer.get("_target_") in {"torch.optim.Adam", "torch.optim.AdamW"}
+        and optimizer.get("fused", False)
+        and str(cfg.trainer.get("precision", "32-true")).endswith("-mixed")
+        and cfg.trainer.get("gradient_clip_val", 0)
+    ):
+        raise ValueError(
+            "Lightning mixed precision rejects fused Adam/AdamW with gradient clipping; "
+            "set model.optimizer.fused=false and retain the configured clipping"
+        )
     if cfg.get("num_threads") is not None and (
         type(cfg.num_threads) is not int or cfg.num_threads < 1
     ):
@@ -113,6 +146,19 @@ def validate_config(cfg: DictConfig) -> None:
 def _validate_upstream_forecasting(cfg: DictConfig) -> None:
     """Validate the waveform contract and supported Lightning execution modes."""
     backbone = cfg.model.backbone.config
+    metric_interval = cfg.model.get("training_metric_interval", 1)
+    if type(metric_interval) is not int or metric_interval < 1:
+        raise ValueError("training_metric_interval must be a positive integer")
+    waveform_datamodule = cfg.data.get("_target_") in {
+        "src.data.wav_datamodule.WAVManifestDataModule",
+        "src.data.sharded_audio_datamodule.ShardedAudioDataModule",
+    }
+    if cfg.data.get("_target_") == "src.data.sharded_audio_datamodule.ShardedAudioDataModule":
+        max_steps = cfg.trainer.get("max_steps", -1)
+        if type(max_steps) is not int or max_steps < 1:
+            raise ValueError(
+                "sharded audio requires trainer.max_steps > 0 for its infinite iterator"
+            )
     values = {
         "data.num_samples": cfg.data.num_samples,
         "data.sample_rate": cfg.data.sample_rate,
@@ -143,18 +189,12 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
             "data.num_samples must equal backbone.window_samples * "
             f"(context_windows + max(horizons)) = {expected}"
         )
-    if (
-        cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
-        and cfg.data.get("require_full_length") is not True
-    ):
+    if waveform_datamodule and cfg.data.get("require_full_length") is not True:
         raise ValueError("upstream forecasting requires data.require_full_length=true")
     if cfg.model.regularization_weight > 0:
         if cfg.data.batch_size < 2:
             raise ValueError("regularization requires data.batch_size >= 2")
-        if (
-            cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
-            and cfg.data.get("minimum_batch_size", 1) < 2
-        ):
+        if waveform_datamodule and cfg.data.get("minimum_batch_size", 1) < 2:
             raise ValueError(
                 "regularization requires data.minimum_batch_size >= 2 for WAV datasets"
             )
@@ -193,7 +233,7 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         raise ValueError("upstream forecasting supports single-device or DDP strategies only")
     if (
         device_count * nodes > 1
-        and cfg.data.get("_target_") == "src.data.wav_datamodule.WAVManifestDataModule"
+        and waveform_datamodule
         and cfg.trainer.get("use_distributed_sampler", True)
     ):
         raise ValueError(

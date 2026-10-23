@@ -24,7 +24,8 @@
     "Inherited AudioMAE positional-utility source removed from active package and replaced by an independent 1D sinusoidal formula implementation; original source hash and historical license retained for provenance. Float32 golden outputs match the pinned original source.",
     "Gradient checkpointing preserves encoder padding masks and also covers decoder and differentiable top-k student readout; torch.compile remains unsupported by the adapter.",
     "Target normalization and masked-loss arithmetic use FP32 under autocast; default FP32 equations unchanged.",
-    "Added differentiable student top-k readout matching teacher layer selection, normalization, and omission of final encoder LayerNorm; original masked branch is unchanged."
+    "Added differentiable student top-k readout matching teacher layer selection, normalization, and omission of final encoder LayerNorm; original masked branch is unchanged by default.",
+    "Optional compact_masked_tokens packs visible student encoder/decoder positions before the original PyTorch Transformer layers and restores their dense positions afterward; teacher targets, weights, zero-dropout masked objective, and state-dict layout are preserved, with floating-point reduction-order differences. Disabled by default."
   ],
   "scope": "Core JEPA, convolutional feature extractor, masking and initialization; independently implemented positional formula; no evaluation vendors or data_modules.",
   "third_party_licenses": {

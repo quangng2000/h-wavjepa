@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from src.objectives.distributed import prepare_population, regularizer_rng
+from src.objectives.localereg_fast import fixed_shape_local_loss
 from src.vendor.localereg.losses import ballreg_loss, local_ballreg_loss
 
 SOURCE_COMMIT = "771361c18d37e65df3dc188761ffb26751ce4e37"
@@ -23,8 +24,12 @@ class LocaLeReg(nn.Module):
         min_cluster_size: int = 4,
         kmeans_iters: int = 10,
         n_quad: int = 256,
+        fixed_shape_kmeans: bool = False,
     ) -> None:
         super().__init__()
+        if type(fixed_shape_kmeans) is not bool:
+            raise ValueError("fixed_shape_kmeans must be boolean")
+        self.fixed_shape_kmeans = fixed_shape_kmeans
         for name, value, minimum in (
             ("num_proj", num_proj, 1),
             ("num_clusters", num_clusters, 1),
@@ -63,19 +68,24 @@ class LocaLeReg(nn.Module):
         losses, diagnostics = [], []
         for time_states in states:
             stats: dict[str, float] = {}
-            losses.append(
-                local_ballreg_loss(
+            kwargs = dict(
+                loss=test,
+                num_clusters=self.num_clusters,
+                min_cluster_size=self.min_cluster_size,
+                kmeans_iters=self.kmeans_iters,
+                stats=stats,
+            )
+            if self.fixed_shape_kmeans:
+                value = fixed_shape_local_loss(time_states.unsqueeze(0), **kwargs)
+            else:
+                value = local_ballreg_loss(
                     time_states.unsqueeze(0),
-                    loss=test,
-                    num_clusters=self.num_clusters,
-                    min_cluster_size=self.min_cluster_size,
-                    kmeans_iters=self.kmeans_iters,
+                    **kwargs,
                     normalize_for_kmeans=True,
                     weighted=False,
                     kmeans_backend="torch",
-                    stats=stats,
                 )
-            )
+            losses.append(value)
             diagnostics.append(stats)
         self.last_stats = {
             name: sum(stats[name] for stats in diagnostics) / len(diagnostics)

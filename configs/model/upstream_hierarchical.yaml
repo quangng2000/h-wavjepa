@@ -22,6 +22,8 @@ backbone:
     average_top_k_layers: 8
     compile_modules: false
     use_gradient_checkpointing: false
+    # Pack only visible student/decoder queries; teacher and objective stay dense-equivalent.
+    compact_masked_tokens: false
     masker:
       target_masks_per_context: 4
       context_mask_prob: 0.65
@@ -61,6 +63,7 @@ regularizer_kind: localereg
 localereg_clusters: 4
 localereg_min_cluster_size: 4
 localereg_kmeans_iters: 10
+localereg_fixed_shape_kmeans: false
 localereg_n_quad: 256
 ema_decay: 0.999
 ema_end_decay: 0.99999

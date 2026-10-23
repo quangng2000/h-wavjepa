@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - audioset_h100_fast
+  - _self_
+
+# Keep the optimizer and regularizer population at 64 recordings, not 128.
+tags: [audioset, pointwise-hierarchy, four-h100, localereg, performance-candidate]
+data:
+  batch_size: 16
+trainer:
+  devices: 4
+

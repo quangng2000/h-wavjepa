@@ -93,6 +93,7 @@ class JEPA(pl.LightningModule):
         compile_modules : bool = False,
         size : str = "base",
         target_length: Optional[int] = None,
+        compact_masked_tokens: bool = False,
         **kwargs : dict[str, Any],
     ):
         super().__init__(**kwargs)
@@ -109,6 +110,9 @@ class JEPA(pl.LightningModule):
         self.total_patches = feature_extractor.total_patches(self.target_length)
         self.use_compiled_forward = compile_modules
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        if type(compact_masked_tokens) is not bool:
+            raise ValueError("compact_masked_tokens must be boolean")
+        self.compact_masked_tokens = compact_masked_tokens
         self.save_hyperparameters(
             ignore=["feature_encoder", "feature_extractor", "loss_fn"]
         )
@@ -451,10 +455,7 @@ class JEPA(pl.LightningModule):
         src_key_padding_mask = rearrange(src_key_padding_mask, 'B T Seq1 -> (B T) Seq1')
         
         #Decoder only attends to context tokens and target mask tokens.
-        if self.use_gradient_checkpointing and self.training:
-            tgt = checkpoint(self.decoder, tgt, src_key_padding_mask=src_key_padding_mask, use_reentrant=False)
-        else:
-            tgt = self.decoder(tgt, src_key_padding_mask = src_key_padding_mask)
+        tgt = self._masked_transformer(self.decoder, tgt, src_key_padding_mask)
         preds = self.decoder_to_encoder_mapper(tgt)
         return preds
 
@@ -465,12 +466,53 @@ class JEPA(pl.LightningModule):
     src_key_padding_mask : Optional[torch.BoolTensor] = None
     ) -> torch.Tensor:
 
-        if self.use_gradient_checkpointing and self.training:
-            contextual_features = checkpoint(self.encoder, x_contexts, src_key_padding_mask=src_key_padding_mask, use_reentrant=False)
-        else:
-            contextual_features = self.encoder(x_contexts, src_key_padding_mask = src_key_padding_mask)
+        return self._masked_transformer(self.encoder, x_contexts, src_key_padding_mask)
 
-        return contextual_features
+    def _masked_transformer(self, transformer, x, padding_mask):
+        """Optionally skip masked queries while preserving visible-token attention.
+
+        Positions are already embedded in x. A masked key never contributes to
+        a visible query at any layer, and neither the encoder's discarded queries
+        nor the decoder's discarded predictions enter the objective. Pack only
+        visible positions, pad to this batch's longest row, then restore their
+        original dense positions. The dense EMA teacher is unchanged.
+
+        The default path remains the exact upstream traversal. Packing preserves
+        the mathematical objective, not bitwise reduction order or dropout RNG.
+        WavJEPA uses zero dropout; nonzero training dropout is rejected here.
+        """
+        indices = valid = None
+        original_shape = x.shape
+        if self.compact_masked_tokens and padding_mask is not None:
+            if padding_mask.dtype != torch.bool or padding_mask.shape != x.shape[:2]:
+                raise ValueError("token compaction requires a boolean [batch,tokens] padding mask")
+            if self.training and any(
+                isinstance(module, nn.Dropout) and module.p != 0
+                or isinstance(module, nn.MultiheadAttention) and module.dropout != 0
+                for module in transformer.modules()
+            ):
+                raise ValueError("training token compaction requires zero dropout")
+            lengths = (~padding_mask).sum(dim=1)
+            if not torch.all(lengths > 0):
+                raise ValueError("token compaction requires a visible token in every row")
+            width = int(lengths.max().item())
+            positions = torch.arange(x.shape[1], device=x.device).expand(x.shape[0], -1)
+            # Unique sort keys keep chronological order; no padded index repeats.
+            indices = (positions + padding_mask * x.shape[1]).argsort(dim=1)[:, :width]
+            valid = torch.arange(width, device=x.device)[None, :] < lengths[:, None]
+            x = x.gather(1, indices[..., None].expand(-1, -1, x.shape[2]))
+            padding_mask = ~valid
+        if self.use_gradient_checkpointing and self.training:
+            x = checkpoint(transformer, x, src_key_padding_mask=padding_mask, use_reentrant=False)
+        else:
+            x = transformer(x, src_key_padding_mask=padding_mask)
+        if indices is not None:
+            x = x.new_zeros(original_shape).scatter(
+                1,
+                indices[..., None].expand(-1, -1, x.shape[2]),
+                x * valid[..., None],
+            )
+        return x
 
     def encoder_top_k_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Differentiable counterpart of the teacher's complete-window readout.

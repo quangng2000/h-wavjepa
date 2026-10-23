@@ -21,7 +21,13 @@ from src.vendor.localereg.losses import ballreg_loss, local_ballreg_loss
 def _regularizer(kind):
     if kind == "sigreg":
         return SIGReg(num_proj=8)
-    return LocaLeReg(num_proj=8, num_clusters=2, min_cluster_size=2, n_quad=32)
+    return LocaLeReg(
+        num_proj=8,
+        num_clusters=2,
+        min_cluster_size=2,
+        n_quad=32,
+        fixed_shape_kmeans=kind == "localereg_fixed_shape",
+    )
 
 
 def _reference(kind, states):
@@ -57,7 +63,7 @@ def _distributed_worker(rank, rendezvous):
         "gloo", rank=rank, world_size=2, init_method=rendezvous, timeout=timedelta(seconds=45)
     )
     try:
-        for kind in ("sigreg", "localereg"):
+        for kind in ("sigreg", "localereg", "localereg_fixed_shape"):
             torch.manual_seed(73)
             inputs = torch.randn(2, 12, 4)
             online = DistributedDataParallel(nn.Linear(4, 6))
@@ -116,7 +122,7 @@ def test_two_process_gloo_matches_independent_global_batch_values_and_ddp_gradie
     )
 
 
-@pytest.mark.parametrize("kind", ["sigreg", "localereg"])
+@pytest.mark.parametrize("kind", ["sigreg", "localereg", "localereg_fixed_shape"])
 def test_bfloat16_autocast_uses_fp32_statistics_and_preserves_gradients(kind):
     torch.manual_seed(83)
     inputs = torch.randn(2, 12, 4, requires_grad=True)
@@ -139,7 +145,7 @@ def test_bfloat16_autocast_uses_fp32_statistics_and_preserves_gradients(kind):
     assert torch.isfinite(producer.weight.grad).all()
 
 
-@pytest.mark.parametrize("kind", ["sigreg", "localereg"])
+@pytest.mark.parametrize("kind", ["sigreg", "localereg", "localereg_fixed_shape"])
 def test_explicit_seed_is_repeatable_without_consuming_global_rng(kind):
     regularizer = _regularizer(kind)
     states = torch.randn(2, 12, 6)

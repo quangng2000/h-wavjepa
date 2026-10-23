@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - audioset_h100
+  - _self_
+
+# Candidate for a sustained real-data benchmark, not a measured speed claim.
+# The loss, regularizer population (64), readout and schedule are unchanged.
+tags: [audioset, pointwise-hierarchy, two-h100, localereg, performance-candidate]
+data:
+  persistent_workers: true
+  prefetch_factor: 2
+model:
+  optimizer:
+    # Lightning mixed precision rejects fused AdamW with gradient clipping.
+    # Keep the inherited clip norm and use the supported optimizer path.
+    fused: false
+  # Reduces training diagnostic collectives. Epoch training metrics are sampled;
+  # every validation/test batch is still measured. Loss runs on every update.
+  training_metric_interval: 50
+  # Same seeded clustering and official BallReg loss; fixed-shape Lloyd updates.
+  localereg_fixed_shape_kmeans: true
+trainer:
+  enable_progress_bar: false
+callbacks:
+  rich_progress_bar: null
+

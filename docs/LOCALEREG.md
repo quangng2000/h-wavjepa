@@ -56,11 +56,22 @@ does not guarantee that neighborhoods correspond to speakers or sound classes.
 | `localereg_clusters` | 4 | Experimental choice; upstream loss default is 8. |
 | `localereg_min_cluster_size` | 4 | Small clusters skipped, with whole-batch fallback. |
 | `localereg_kmeans_iters` | 10 | Uses upstream's torch backend. |
+| `localereg_fixed_shape_kmeans` | false | Optional fixed-shape Lloyd updates; same cluster assignments and official BallReg loss. |
 | `sigreg_projections` | 128 | Legacy field name shared by both regularizers; upstream ball-loss default is 256. |
 | `localereg_n_quad` | 256 | Higher than upstream's 64 to resolve width 768. |
 | Frequency knots/range | 17 / `[0,3]` | Upstream defaults. |
 | `regularization_weight` | 0.1 | Initial experiment setting, not a tuned optimum. |
 | AudioSet H100 population | 32/rank × 2 ranks = 64 | Exercised in three full-model generated-audio updates on two H100s; sustained real-data throughput unmeasured. |
+
+The performance candidate presets enable `localereg_fixed_shape_kmeans`. Its
+[attributed adapter](../src/objectives/localereg_fast.py) replaces dynamic boolean
+indexing inside the detached k-means iterations with fixed-size scatter counts
+and `torch.where`. The vendored reference remains unchanged; random initialization,
+iteration count, cluster filtering, equal weighting, and the official BallReg
+function are retained. Tests compare assignments, loss, gradients, diagnostics,
+and RNG state against the reference, including empty clusters and global fallback.
+This option records its implementation choice in checkpoint metadata. It is not
+a measured speedup claim until a sustained GPU benchmark completes.
 
 At width 768, 64 quadrature nodes give a maximum characteristic-function error
 over 0.2 on the 17-point grid against an independent float64 512-node calculation.
