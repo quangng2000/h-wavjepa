@@ -150,10 +150,13 @@ def freeze_index(output: Path, endpoint: str, *, devices: int, workers: int) -> 
 
 
 def make_config(args, frozen: dict, cache: Path):
+    temporal = getattr(args, "temporal", False)
+    experiment = f"audioset_{'temporal_' if temporal else ''}h100_"
+    experiment += "four" if args.devices == 4 else "fast"
     with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
         cfg = compose(
             config_name="train",
-            overrides=["experiment=audioset_h100_fast", "data=sharded_audio"],
+            overrides=[f"experiment={experiment}", "data=sharded_audio"],
         )
     OmegaConf.set_struct(cfg, False)
     cfg.paths.root_dir = cfg.paths.work_dir = str(ROOT)
@@ -169,6 +172,7 @@ def make_config(args, frozen: dict, cache: Path):
             "steps": args.steps,
             "warmup": args.warmup,
             "frozen_sha256": frozen["frozen_index_sha256"],
+            "temporal": temporal,
         }
     }
     cfg.data.index_path = frozen["path"]
@@ -202,10 +206,67 @@ def make_config(args, frozen: dict, cache: Path):
     return cfg
 
 
+def architecture_facts(model) -> dict:
+    """Read instantiated geometry, not merely the requested command-line flag."""
+    return {
+        "aggregation_windows": list(model.aggregation_windows),
+        "level_support_windows": list(model.level_support_windows),
+        "temporal_variance_weight": model.temporal_variance_weight,
+        "temporal_std_floor": model.temporal_std_floor,
+        "temporal_variance_epsilon": model.temporal_variance_epsilon,
+        "context_windows": model.context_windows,
+        "sample_windows": model.sample_windows,
+        "state_strides": list(model.state_strides),
+        "dense_context_states": [len(p) for p in model.level_positions(model.context_windows)],
+        "predictor_context_states": [
+            len(p) for p in model.level_positions(model.context_windows, subsample=True)
+        ],
+        "masked_weight": model.masked_weight,
+    }
+
+
+def require_architecture(facts: dict, *, temporal: bool) -> None:
+    expected = {
+        "aggregation_windows": [1, 2, 2] if temporal else [1, 1, 1],
+        "level_support_windows": [1, 2, 4] if temporal else [1, 1, 1],
+        "temporal_variance_weight": 0.1 if temporal else 0.0,
+        "temporal_std_floor": 0.1,
+        "temporal_variance_epsilon": 1e-4,
+        "context_windows": 5,
+        "sample_windows": 9,
+        "state_strides": [1, 2, 4],
+        "dense_context_states": [5, 4, 2] if temporal else [5, 5, 5],
+        "predictor_context_states": [5, 2, 1] if temporal else [5, 3, 2],
+        "masked_weight": 1.0,
+    }
+    if facts != expected:
+        raise RuntimeError("Instantiated architecture does not match the requested streaming probe")
+
+
+def temporal_loss_metrics(metrics: dict, *, stage: str) -> dict:
+    suffix = "_step" if stage == "train" else ""
+    names = ["temporal_variance_loss"] + [
+        f"level_{level}/temporal_variance_loss" for level in (1, 2)
+    ]
+    try:
+        values = {name: float(metrics[f"{stage}/{name}{suffix}"]) for name in names}
+    except KeyError as error:
+        raise RuntimeError("Temporal-loss evidence is missing") from error
+    if any(not math.isfinite(value) or value < 0 for value in values.values()):
+        raise RuntimeError("Temporal-loss evidence is negative or nonfinite")
+    if not math.isclose(
+        values[names[0]], values[names[1]] + values[names[2]], rel_tol=1e-5, abs_tol=1e-7
+    ):
+        raise RuntimeError("Temporal-loss evidence does not match the upper-level sum")
+    return values
+
+
 class StreamingTimings(L.Callback):
-    def __init__(self, output, cache, steps, warmup, frozen_sha256):
+    def __init__(self, output, cache, steps, warmup, frozen_sha256, temporal=False):
         self.output, self.cache = Path(output), Path(cache)
         self.steps, self.warmup, self.frozen_sha = steps, warmup, frozen_sha256
+        self.temporal = temporal
+        self.temporal_samples = []
         self.ends, self.started = [], None
         self.validation_clips = self.validation_batches = 0
 
@@ -220,17 +281,31 @@ class StreamingTimings(L.Callback):
 
     def on_train_start(self, trainer, pl_module):
         self.worker_facts = worker_facts(trainer.train_dataloader)
+        self.architecture = architecture_facts(pl_module)
+        require_architecture(self.architecture, temporal=self.temporal)
         torch.cuda.synchronize()
         self.wall_started = time.perf_counter()
         self.initial = next(pl_module.backbone.model.encoder.parameters()).detach().clone()
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         torch.cuda.synchronize()
+        if self.temporal and (
+            trainer.global_step == 1
+            or trainer.global_step % pl_module.training_metric_interval == 0
+        ):
+            self.temporal_samples.append(
+                {
+                    "optimizer_step": trainer.global_step,
+                    "metrics": temporal_loss_metrics(trainer.callback_metrics, stage="train"),
+                }
+            )
         if trainer.global_step in (1, self.warmup) or trainer.global_step % 25 == 0:
             atomic_report(
                 self.output / f"progress-rank-{trainer.global_rank}.json",
                 {
                     **self.worker_facts,
+                    "architecture": self.architecture,
+                    "temporal_training_samples": self.temporal_samples,
                     "ok": False,
                     "stage": "training_incomplete",
                     "rank": trainer.global_rank,
@@ -276,6 +351,8 @@ class StreamingTimings(L.Callback):
         refills = end_cache["verified_files"] > self.warm_cache["verified_files"]
         report = {
             **self.worker_facts,
+            "architecture": self.architecture,
+            "temporal_training_samples": self.temporal_samples,
             "rank": trainer.global_rank,
             "world_size": trainer.world_size,
             "global_batch": 64,
@@ -310,7 +387,7 @@ def finite_metrics(results: list[dict]) -> dict:
     return metrics
 
 
-def verify_checkpoint(checkpoint, model, datamodule, steps: int) -> None:
+def verify_checkpoint(checkpoint, model, datamodule, steps: int) -> dict:
     if (
         checkpoint.get("global_step") != steps
         or int(checkpoint["state_dict"]["ema_updates"]) != steps
@@ -331,6 +408,7 @@ def verify_checkpoint(checkpoint, model, datamodule, steps: int) -> None:
     ):
         raise RuntimeError("Saved model tensors differ from the trained model")
     model.load_state_dict(saved, strict=True)
+    return architecture_facts(model)
 
 
 def durable_checkpoint_roundtrip(
@@ -371,7 +449,7 @@ def durable_checkpoint_roundtrip(
         download_seconds = time.perf_counter() - download_started
         verify_started = time.perf_counter()
         restored = torch.load(downloaded, map_location="cpu", weights_only=True)
-        verify_checkpoint(restored, model, datamodule, steps)
+        architecture = verify_checkpoint(restored, model, datamodule, steps)
         del restored
         check()
         return {
@@ -384,6 +462,7 @@ def durable_checkpoint_roundtrip(
             "complete_remote_readback_verified": True,
             "download_sha256_verified": True,
             "strict_tensor_and_metadata_roundtrip": True,
+            "architecture": architecture,
             "receipt": receipt,
         }
     finally:
@@ -397,6 +476,7 @@ def summarize(
     frozen: dict,
     *,
     require_durable_checkpoint: bool = False,
+    temporal: bool = False,
 ) -> dict:
     ranks = [json.loads((output / f"rank-{rank}.json").read_text()) for rank in range(devices)]
     validation = [
@@ -414,6 +494,20 @@ def summarize(
             raise RuntimeError("Rank reports disagree on topology, progress or frozen dataset")
         if not train.get("online_weights_changed") or not train.get("all_model_parameters_finite"):
             raise RuntimeError("A rank did not prove finite parameter updates")
+        for row in (train, val):
+            require_architecture(row.get("architecture", {}), temporal=temporal)
+        if temporal:
+            samples = train.get("temporal_training_samples", [])
+            if not samples or samples[0].get("optimizer_step") != 1:
+                raise RuntimeError("A rank did not report sampled temporal training losses")
+            for sample in samples:
+                if not 1 <= sample.get("optimizer_step", 0) <= steps:
+                    raise RuntimeError("Temporal-loss sample falls outside the training interval")
+                temporal_loss_metrics(
+                    {f"train/{name}_step": value for name, value in sample["metrics"].items()},
+                    stage="train",
+                )
+            temporal_loss_metrics(val["metrics"], stage="val")
         if (
             train.get("data_worker_start_method") != "spawn"
             or train.get("workers_per_rank", 0) < 1
@@ -440,6 +534,7 @@ def summarize(
         or checkpoint.get("bytes", 0) <= 0
     ):
         raise RuntimeError("Checkpoint roundtrip evidence is missing")
+    require_architecture(checkpoint.get("architecture", {}), temporal=temporal)
     if require_durable_checkpoint:
         durable = checkpoint.get("durable_s3", {})
         receipt = durable.get("receipt", {})
@@ -459,8 +554,11 @@ def summarize(
             or receipt.get("checkpoint", {}).get("bytes") != checkpoint["bytes"]
         ):
             raise RuntimeError("Durable S3 checkpoint roundtrip evidence is missing or mismatched")
+        require_architecture(durable.get("architecture", {}), temporal=temporal)
     return {
         "ok": True,
+        "model_variant": "temporal_aggregation" if temporal else "pointwise",
+        "architecture": ranks[0]["architecture"],
         "data_worker_start_method": "spawn",
         "workers_per_rank": ranks[0]["workers_per_rank"],
         "input": "private S3 streaming from a frozen index",
@@ -475,6 +573,7 @@ def summarize(
         "checkpoint": checkpoint,
         "durable_checkpoint_required": require_durable_checkpoint,
         "limitations": [
+            "A passing execution probe does not establish temporal representation quality or rule out collapse.",
             "Only the frozen verified cohort was sampled; partial staging is not the full dataset.",
             "Short measured cache refills cannot guarantee long-run storage or GPU throughput.",
             "Steady-state extrapolation excludes validation, checkpoint uploads and queue time.",
@@ -487,6 +586,7 @@ def run(args):
     from src.train import train
 
     checkpoint_required = durable_checkpoint_options(args) is not None
+    temporal = getattr(args, "temporal", False)
     collective_seconds = collective_timeout_seconds(args)
     rank, local_rank, world = (int(os.environ[key]) for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"))
     if world != args.devices or torch.cuda.device_count() < args.devices:
@@ -540,7 +640,7 @@ def run(args):
             print(
                 f"streaming train start: devices={world} global_batch=64 "
                 f"steps={args.steps} warmup={args.warmup} workers_per_rank={args.workers} "
-                f"compact_masked_tokens={args.compact}",
+                f"compact_masked_tokens={args.compact} temporal_aggregation={temporal}",
                 flush=True,
             )
         _, objects = train(make_config(args, frozen, cache))
@@ -561,6 +661,8 @@ def run(args):
         metrics = finite_metrics(
             trainer.validate(model=model, datamodule=datamodule, verbose=False)
         )
+        if temporal:
+            temporal_loss_metrics(metrics, stage="val")
         timing = objects["callbacks"][0]
         if timing.validation_clips != frozen["validation_used_clips"] // world:
             raise RuntimeError("Validation did not consume the complete frozen held-out allocation")
@@ -570,6 +672,7 @@ def run(args):
             args.output / f"validation-rank-{rank}.json",
             {
                 "rank": rank,
+                "architecture": architecture_facts(model),
                 "world_size": world,
                 "optimizer_steps": trainer.global_step,
                 "ema_updates": int(model.ema_updates),
@@ -594,12 +697,13 @@ def run(args):
                 saved_seconds = time.perf_counter() - saved_at
                 loaded_at = time.perf_counter()
                 checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-                verify_checkpoint(checkpoint, model, datamodule, args.steps)
+                architecture = verify_checkpoint(checkpoint, model, datamodule, args.steps)
                 checkpoint_report = {
                     "save_seconds": saved_seconds,
                     "load_verify_seconds": time.perf_counter() - loaded_at,
                     "bytes": checkpoint_path.stat().st_size,
                     "strict_tensor_and_metadata_roundtrip": True,
+                    "architecture": architecture,
                     "stream_positions_checkpointed": False,
                 }
                 del checkpoint
@@ -639,6 +743,7 @@ def run(args):
                 args.steps,
                 frozen,
                 require_durable_checkpoint=checkpoint_required,
+                temporal=temporal,
             )
             summary["compact_masked_tokens"] = args.compact
             summary["workers_per_rank"] = args.workers
@@ -662,6 +767,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--devices", type=int, choices=(2, 4), required=True)
     parser.add_argument("--compact", action="store_true")
+    parser.add_argument(
+        "--temporal",
+        action="store_true",
+        help="Use the temporal AudioSet preset: causal 1/2/4-window support and a 0.1 variance weight",
+    )
     parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--workers", type=int, default=1)

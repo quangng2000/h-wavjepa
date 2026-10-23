@@ -136,6 +136,15 @@ torchrun --standalone --nproc_per_node=4 scripts/benchmark_streaming_gpu.py \
   --output /output/streaming-benchmark --scratch-parent /tmp
 ```
 
+Add `--temporal` to exercise the temporal aggregation model and its upper-space
+variance penalty. On four GPUs this composes `audioset_temporal_h100_four`, with
+1/2/4-window support and temporal weight `0.1`; omitting the flag preserves the
+pointwise probe. Reports identify the instantiated geometry and check finite
+temporal-loss measurements during training and validation, plus architecture
+metadata after checkpoint loading. This verifies execution of the requested
+objective, not semantic abstraction or freedom from collapse. Throughput belongs
+to the recorded model variant and must not be transferred between variants.
+
 For a durable checkpoint acceptance run, add
 `--checkpoint-bucket <private-bucket> --checkpoint-prefix probes/<unique-run-id>`
 and `--checkpoint-run-id <unique-run-id> --exclusive-checkpoint-writer`.
