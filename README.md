@@ -17,9 +17,9 @@ The model retains masked prediction and adds three future predictors. Upper stat
 Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --frozen --extra hear
+uv sync --frozen --extra hear --extra data
 uv run python -m src.train              # tiny generated-audio smoke run
-uv run --extra hear pytest
+uv run --extra hear --extra data pytest
 ```
 
 The smoke run downloads no data or weights. Tests cover model, gradient, checkpoint, sampling, and distributed behavior. A two-H100 BF16 train/resume test and three full-model generated-audio updates also passed; see [validation evidence](docs/VALIDATION.md).
@@ -47,6 +47,10 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 -m src.train \
 
 This selects DDP, BF16 mixed precision, gradient checkpointing, and 32 examples per GPU. Regularizers gather the **64-example global batch**; gradient accumulation does not enlarge that population. Training samples a new contiguous 9.09-second excerpt per epoch, so 10-second clips fit without padding. Three full-model updates on two H100 80 GB GPUs used about **29.4 GiB peak allocated memory per GPU**. Sustained AudioSet throughput and total training time still require a real-data benchmark.
 
+For a corpus stored as staged TAR shards, use the [streaming input guide](docs/SHARDED_AUDIO.md). It reads private S3 through WebDataset and a checksum-verified, bounded local cache; no full-corpus extraction is needed.
+
+See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-GPU comparisons, and reliable checkpoints with streaming input.
+
 [AudioSet guide](docs/AUDIOSET.md): manifest segments, pretrained initialization, exact timing, checkpoint resume, and evaluation. This adaptation uses the original 375,000-step budget, **not the original eight random two-second crop recipe**.
 
 ## Experiments
@@ -55,6 +59,7 @@ This selects DDP, BF16 mixed precision, gradient checkpointing, and 32 examples 
 | --- | --- |
 | `audioset` | Pointwise hierarchy, random initialization, one-device FP32 |
 | `audioset_h100` | Same AudioSet experiment configured for two H100s |
+| `audioset_h100_fast` / `audioset_h100_four` | Performance candidates on two/four H100s, keeping global batch 64 |
 | `audioset_pretrained` | AudioSet hierarchy initialized from released WavJEPA weights |
 | `audioset_flat` | Matched horizons and strides, upper maps replaced by identities |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |

@@ -3,10 +3,13 @@
 Validated locally on CPU on 22 October 2026. These checks establish software
 behavior, not improved representation quality or reproduced benchmark scores.
 
-The local suite reports **454 passed, 1 skipped**. The skipped case needs two
-BF16-capable CUDA devices and subsequently **passed on two H100s**, as recorded
-below. Ruff and an independent original-source comparison also pass. GitHub CI
-passed on Python 3.11, 3.12 and 3.13, plus the separate official HEAR smoke.
+The current local suite reports **596 passed, 3 skipped** in 83.63 seconds.
+The skips require two BF16-capable CUDA devices, CUDA for the optional clustering
+parity check, and FFmpeg for the preparation integration test. The earlier
+two-H100 smoke and CPU preparation-host checks are recorded separately below.
+Ruff lint, Ruff formatting (115 files), and `uv lock --check` (113 packages) pass.
+Previously recorded GitHub CI runs passed on Python 3.11, 3.12 and 3.13, plus
+the separate official HEAR smoke; this local run is not a new CI result.
 
 ## Official WavJEPA reuse
 
@@ -70,12 +73,51 @@ matching normalized top-k readouts for the student and EMA upper maps.
 Run:
 
 ```bash
-uv sync --frozen --extra hear
-uv run --extra hear ruff check .
-uv run --extra hear ruff format --check .
-uv run --extra hear pytest
+uv sync --frozen --extra hear --extra data
+uv run --extra hear --extra data ruff check .
+uv run --extra hear --extra data ruff format --check .
+uv run --extra hear --extra data pytest
 uv run python -m src.train experiment=upstream_smoke
 ```
+
+## Execution and streaming regressions
+
+Optional masked-token compaction is compared against the dense path for retained
+predictions, masked loss, teacher targets and every parameter gradient. Cases
+include uneven masks, one visible token, unmasked rows, checkpointed execution,
+CPU BF16, zero-dropout enforcement and checkpoint compatibility. These numerical
+checks do not measure a GPU speedup.
+
+The fixed-shape LocaLeReg adapter preserves reference cluster assignments, loss,
+gradients, diagnostic values and RNG state in CPU comparisons, including empty
+clusters and whole-population fallback. Two-process Gloo tests also compare its
+distributed gradients with the official global-population reference. Finite
+gradient checks still reject NaN/Inf before optimizer or EMA changes, while
+accepting large finite gradients whose norm would overflow. Training with sampled
+diagnostics produces identical model state to logging every update in the tested
+CPU run. The fast presets preserve global batch 64 and the full update schedule.
+
+Actual Lightning runs over infinite iterators verify periodic latest checkpoints
+and a final checkpoint when validation continually worsens. Retention is bounded
+to one latest regular file, a `last.ckpt` symlink and one optional best file.
+An official Lightning Timer stops the iterator with `min_epochs=0` and preserves
+the final optimizer state. Tests also construct the fast presets' callbacks and
+exercise ordinary AdamW with BF16 mixed precision and gradient clipping; the
+unsupported fused-optimizer combination is rejected during configuration checks.
+
+The sharded-input tests exercise actual WebDataset TAR decoding, source and
+manifest checksum rejection, private-read fixtures, bounded caches, real worker
+processes, rank-disjoint training and two-process collective validation. Resume
+tests reject an index change or unacknowledged worker-sequence restart. They do
+not establish exact iterator-position recovery, which is not implemented.
+
+CPU tests for the bounded GPU benchmark programs verify local/S3 pilot checksums,
+safe extraction, unchanged global-batch/loss/schedule settings, all-rank report
+agreement, validation evidence and full checkpoint metadata. They do not turn a
+configured GPU probe into an executed throughput result. The separate
+[S3 read probe](validation/s3-read-probe-2026-10-22.json) measured one verified
+625,715,200-byte read plus SHA256 at 96.1 MB/s on a CPU node; it excludes disk
+caching, audio decoding and concurrent GPU training.
 
 ## Real AudioSet CPU pilot
 
