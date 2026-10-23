@@ -12,7 +12,7 @@ reimplementation and not an endorsed upstream release.
 ## Third-party notice
 
 The previously copied AudioMAE positional utility has been removed from active
-code. `pos_embed.py` now implements only the mathematical 1D sinusoidal formula,
+code. `pos_embed.py` now implements the mathematical 1D/2D sinusoidal formulas,
 independently, with the sine-then-cosine channel ordering required by WavJEPA.
 Float32 outputs are checked against golden hashes generated from the unmodified
 pinned upstream implementation. The original source hash and `LICENSE-AudioMAE`
@@ -99,3 +99,52 @@ Training with nonzero dropout is rejected because packing would change dropout
 sampling. Tests compare visible predictions, teacher targets, losses, all
 parameter gradients, checkpointing, BF16 loss behavior, and checkpoint loading
 against the dense path. CPU correctness does not establish an H100 speedup.
+
+## Binaural WavJEPA-Nat architecture
+
+With `input_channels: 2`, the adapter uses the pinned official
+`ConvChannelFeatureExtractor` with `share_weights_over_channels=False`: two
+independent convolutional encoders, with all left-ear tokens followed by all
+right-ear tokens. The extractor's output-length calculation now uses exact
+integer convolution geometry instead of allocating and printing a dummy forward.
+Its original SHA-256 is recorded in `UPSTREAM.json`.
+
+WavJEPA Section 3.3 specifies 2D time/channel positions and shared context/target
+time indices. The independent implementation matches the released Nat positional
+tensor convention exactly: temporal sine/cosine coordinates in the first half,
+and a channel indicator in the second half (zero for left; sin(0)/cos(0) for
+right). Golden hashes come from byte ranges of the published safetensors file;
+no AudioMAE source is reintroduced. The upstream channel masker interleaved its
+mask entries while its channel extractor concatenated whole channel sequences.
+This integration corrects the masker to the extractor's channel-major order,
+with tests asserting identical context and target time selections for both ears.
+Mono masking and checkpoint tensor names remain unchanged.
+
+Binaural crops are normalized jointly across time and channels, preserving their
+relative levels. `encode_tokens` returns both ears' contextual tokens; the window
+readout averages those tokens. Nominal timestamps repeat the same grid per ear.
+The normalized top-k target rule and encoder-only EMA stay unchanged.
+
+The masked objective can accept crops longer than the hierarchy windows. It
+passes explicit fixed positional tensors and uses the actual mask length in the
+decoder, without replacing learned parameters or changing the fixed-window
+encoder. This allows the Nat eight-random-crop masked recipe alongside a
+separate chronological hierarchy branch. The adapter does not perform scene
+generation or crop sampling itself.
+
+Published mono pretrained weights are not silently copied into two ear encoders
+or relabeled as Nat weights. With `input_channels: 2`, `pretrained=True` selects
+`labhamlet/wavjepa-nat-base` at revision
+`15d95ff67fa98117b17e83a1653bbca97877ff6f`, SHA-256
+`7a37a5c507ca1d75d093895c840e3b225ca41076d017bbafd0be3850ccf97267`.
+The downloader also accepts `--variant nat`. All 465 tensor names, shapes and
+dtypes match the published safetensors header. Local fixtures retain that
+metadata without learned weights. The file is verified against the pinned digest
+on download; no Hub Python executes.
+
+As for mono, a shorter Nat hierarchy window can regenerate only validated fixed
+positions from the official 200-tokens-per-ear grid. All learned tensors must
+strictly match the binaural architecture. No mono-to-binaural learned-weight
+conversion is implemented. Actual full pretrained weights were not downloaded
+during local validation; layout and fixed positional compatibility were checked
+using metadata and small HTTP byte ranges.

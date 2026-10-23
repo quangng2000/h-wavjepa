@@ -1,9 +1,41 @@
 # Validation record
 
-Validated locally on CPU on 22 October 2026. These checks establish software
+These checks establish software
 behavior, not improved representation quality or reproduced benchmark scores.
 
-The current local suite reports **652 passed, 3 skipped** in 148.95 seconds.
+## Nat integration, 23 October 2026
+
+The final local CPU suite reports **1,005 passed, 4 skipped** in 135.21 seconds.
+Two skips require BF16 CUDA DDP, one requires CUDA clustering kernels, and one
+requires the preparation host's FFmpeg. Ruff lint and formatting (139 files),
+`git diff --check`, and the frozen dependency lock check (114 packages) pass.
+These are local results; the new commit's GitHub CI is recorded separately.
+
+The [Nat implementation](WAVJEPA_NAT.md) has local tests for independent ear
+encoders, channel-major shared masks, variable-length masked crops, joint ear
+normalization, scene convolution and SNR, checksum-verified bounded asset
+caching, pinned-source conversion and manifest assembly, Lightning updates,
+checkpoint restore, and mono/stereo HEAR export. Tiny real training verifies
+finite gradients and updates; silent PCM clips retain their distributed batch
+positions with finite zero-energy rendering. The GPU probe's tests reject
+missing BRIR/noise refills and frozen/shared/nonfinite ear encoders on any rank.
+
+A separate checkout of the pinned WavJEPA source again matches small-model
+tokens, predictions, teacher targets, masked loss and parameter gradients
+exactly (maximum token difference zero). All 465 Nat checkpoint tensor shapes
+and names match the published safetensors header, and fixed position encodings
+match hashes of the actual released tensor bytes. Full Nat weights have not
+been downloaded or loaded end to end in this validation.
+
+The published room/noise assets have **not** been staged, and no Nat H100 test
+or production training has run. The prior clean mono throughput result does
+not validate Nat. Synthetic conversion/rendering tests and fake-S3 checkpoint
+roundtrips establish code behavior only; real assets, streaming, capacity,
+transfer timing and representation quality remain unverified.
+
+## Earlier baseline validation, 22 October 2026
+
+The earlier local suite reported **652 passed, 3 skipped** in 148.95 seconds.
 The skips require two BF16-capable CUDA devices, CUDA for the optional clustering
 parity check, and FFmpeg for the preparation integration test. The earlier
 two-H100 smoke and CPU preparation-host checks are recorded separately below.
@@ -95,10 +127,10 @@ matching normalized top-k readouts for the student and EMA upper maps.
 Run:
 
 ```bash
-uv sync --frozen --extra hear --extra data
-uv run --extra hear --extra data ruff check .
-uv run --extra hear --extra data ruff format --check .
-uv run --extra hear --extra data pytest
+uv sync --frozen --extra hear --extra data --extra nat
+uv run --extra hear --extra data --extra nat ruff check .
+uv run --extra hear --extra data --extra nat ruff format --check .
+uv run --extra hear --extra data --extra nat pytest
 uv run python -m src.train experiment=upstream_smoke
 ```
 

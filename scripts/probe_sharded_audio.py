@@ -186,10 +186,10 @@ def run_probe(
                     metrics["tar_iteration_seconds"] += time.perf_counter() - begun
                 yield item
 
-    def timed_decode(*args):
+    def timed_decode(*args, **kwargs):
         begun = time.perf_counter()
         try:
-            return original_decode(*args)
+            return original_decode(*args, **kwargs)
         finally:
             metrics["pcm_decode_seconds"] += time.perf_counter() - begun
 

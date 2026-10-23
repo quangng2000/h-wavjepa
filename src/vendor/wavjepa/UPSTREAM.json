@@ -10,7 +10,8 @@
     "wavjepa/extractors/audio_feature_extractor.py": "f744f969b65f171d1d8580de026f4f0f0bd34d65f598dd508f105f3797cfeda8",
     "wavjepa/extractors/audio_extractor.py": "27428e13c008aa7c2783c1a2f3e1bce8146cd25c910885d0ff4e4b3575fc90f4",
     "wavjepa/types/wavjepa_configs.py": "a87e90dc32fb68b20c7862cf4f838a5a3ddf295d04a94d968a7b2d77382ccd6c",
-    "LICENSE": "aa0676d4054c78e3824310b77bc382f53c4c9facc4ebaa85258fc9bcbece7ba3"
+    "LICENSE": "aa0676d4054c78e3824310b77bc382f53c4c9facc4ebaa85258fc9bcbece7ba3",
+    "wavjepa/extractors/audio_channel_feature_extractor.py": "7aa0e1a45376fbf4e134f863fee9968ffb97cb6885ba5ae148054158ad29f6b9"
   },
   "modifications": [
     "Namespace imports rewritten from wavjepa to src.vendor.wavjepa.",
@@ -25,9 +26,13 @@
     "Gradient checkpointing preserves encoder padding masks and also covers decoder and differentiable top-k student readout; torch.compile remains unsupported by the adapter.",
     "Target normalization and masked-loss arithmetic use FP32 under autocast; default FP32 equations unchanged.",
     "Added differentiable student top-k readout matching teacher layer selection, normalization, and omission of final encoder LayerNorm; original masked branch is unchanged by default.",
-    "Optional compact_masked_tokens packs visible student encoder/decoder positions before the original PyTorch Transformer layers and restores their dense positions afterward; teacher targets, weights, zero-dropout masked objective, and state-dict layout are preserved, with floating-point reduction-order differences. Disabled by default."
+    "Optional compact_masked_tokens packs visible student encoder/decoder positions before the original PyTorch Transformer layers and restores their dense positions afterward; teacher targets, weights, zero-dropout masked objective, and state-dict layout are preserved, with floating-point reduction-order differences. Disabled by default.",
+    "Added pinned ConvChannelFeatureExtractor with independent per-channel CNN weights and original channel-major concatenation; total_patches uses the exact convolution-length recurrence without a temporary forward or debug print.",
+    "Added explicit position_channels=2 to JEPA and an independently implemented two-axis sinusoidal formula for channel-major time/channel coordinates; mono position tensors and state layout are unchanged.",
+    "Corrected TimeInverseBlockMasker channel-mask concatenation from interleaved (time,channel) to channel-major (channel,time), matching the official ConvChannelFeatureExtractor and sharing context/target time indices across ears.",
+    "JEPA.forward accepts explicit fixed encoder/decoder positions for alternate crop lengths and decoder token count follows the actual mask; the adapter can share learned modules between eight longer random Nat crops and shorter chronological hierarchy windows without mutating model parameters."
   ],
-  "scope": "Core JEPA, convolutional feature extractor, masking and initialization; independently implemented positional formula; no evaluation vendors or data_modules.",
+  "scope": "Core JEPA, mono and independent-channel convolutional feature extractors, masking and initialization; independent 1D/2D positional formula; no evaluation vendors or data_modules.",
   "third_party_licenses": {
     "pos_embed": "Active positional implementation is independent and contains none of the inherited AudioMAE utilities. Original source hash and LICENSE-AudioMAE retained solely as historical provenance; no broader commercial-rights claim for pretrained weights or dependencies."
   }

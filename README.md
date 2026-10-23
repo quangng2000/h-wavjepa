@@ -8,6 +8,11 @@ A research baseline for **learned horizon-specific target spaces** on top of the
 
 The model retains masked prediction and adds three future predictors. The **pointwise baseline** transforms individual windows. A separate [temporal version](docs/TEMPORAL_AGGREGATION.md) aggregates 1/2/4 windows and adds optional within-recording variance pressure at the upper levels. Learned semantic abstraction and downstream improvement have not been demonstrated. See the [comparison boundaries](docs/UPSTREAM_DYNAMICS.md#what-the-comparisons-test).
 
+[H-WavJEPA-Nat](docs/WAVJEPA_NAT.md) adds the official independent binaural encoders,
+shared temporal masks, naturalistic room/noise rendering, and eight random
+2.01-second masked crops per recording. Its assets and four-H100 throughput must
+be validated before production; the clean mono benchmark does not qualify Nat.
+
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
 *Pointwise baseline sketch. The AudioSet preset uses 1.01-second windows; the long-recording preset uses 2.01 seconds. See [architecture and temporal grids](docs/UPSTREAM_DYNAMICS.md).*
@@ -17,9 +22,9 @@ The model retains masked prediction and adds three future predictors. The **poin
 Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --frozen --extra hear --extra data
+uv sync --frozen --extra hear --extra data --extra nat
 uv run python -m src.train              # tiny generated-audio smoke run
-uv run --extra hear --extra data pytest
+uv run --extra hear --extra data --extra nat pytest
 ```
 
 The smoke run downloads no data or weights. Tests cover model, gradient, checkpoint, sampling, and distributed behavior. A two-H100 BF16 train/resume test and three full-model generated-audio updates also passed; see [validation evidence](docs/VALIDATION.md).
@@ -51,7 +56,7 @@ For a corpus stored as staged TAR shards, use the [streaming input guide](docs/S
 
 See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-GPU comparisons, and reliable checkpoints with streaming input.
 
-[AudioSet guide](docs/AUDIOSET.md): manifest segments, pretrained initialization, exact timing, checkpoint resume, and evaluation. This adaptation uses the original 375,000-step budget, **not the original eight random two-second crop recipe**.
+[AudioSet guide](docs/AUDIOSET.md): manifest segments, pretrained initialization, exact timing, checkpoint resume, and evaluation. The clean hierarchy uses the original 375,000-step budget with a chronological crop recipe. The [Nat presets](docs/WAVJEPA_NAT.md) retain eight random 2.01-second masked crops and add a separate chronological hierarchy branch.
 
 ## Experiments
 
@@ -67,6 +72,9 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 | `upstream_temporal_smoke` | Tiny generated-audio CPU training/evaluation of the temporal version |
 | `audioset_baseline` | Masked-only control under the same nine-window AudioSet recipe |
 | `audioset_baseline_h100` / `audioset_baseline_h100_fast` / `audioset_baseline_h100_four` | Masked-only controls matching the two/four-H100 execution presets |
+| `audioset_nat` / `audioset_nat_h100_four` | Binaural Nat masked anchor plus temporal hierarchy; explicit BRIR/noise manifest required |
+| `audioset_nat_baseline` / `audioset_nat_baseline_h100_four` | Masked-only Nat control: global 16 recordings × 8 crops |
+| `audioset_nat_pointwise` / `audioset_nat_pointwise_h100_four` | Matched Nat pointwise control, retaining the temporal penalty |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |
 | `upstream_sigreg` / `upstream_baseline` | SIGReg and masked-objective controls on long recordings |
 

@@ -1,5 +1,11 @@
 # Bounded training segments
 
+This runner currently supports the clean mono pointwise and temporal models.
+It deliberately rejects Nat reports: the [Nat route](WAVJEPA_NAT.md) needs its
+own completed asset manifest, passing hardware probe, measured cost, and launch
+contract before bounded production training. The clean mono acceptance receipt
+cannot authorize a Nat run.
+
 `scripts/train_segment.py` runs one four-H100 segment, saves full Lightning state
 to private S3, and exits. It does not rent GPUs, restart jobs, transfer credits, or
 top up an account. The intended plan is to use at most the approved **$500 shared

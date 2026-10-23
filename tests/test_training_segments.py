@@ -768,3 +768,39 @@ def test_hard_watchdog_covers_child_setup_before_torchrun(monkeypatch):
         supervise(SimpleNamespace(plan_only=False), ["--fixture-setup"])
     assert time.monotonic() - started < 10
     assert len(children) == 1 and children[0].poll() is not None
+
+
+def test_segment_runner_explicitly_rejects_nat_before_a_production_plan(tmp_path):
+    report = streaming_report(temporal=True)
+    report["model_variant"] = "nat_temporal_aggregation"
+    report["architecture"].update(
+        input_channels=2, masked_crops_per_recording=8, masked_crop_samples=32160
+    )
+    path = tmp_path / "nat-streaming.json"
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="mono-only"):
+        verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=True)
+
+
+@pytest.mark.parametrize("temporal", [False, True])
+def test_production_gate_preserves_clean_pre_nat_mono_receipts(tmp_path, temporal):
+    report = streaming_report(temporal=temporal)
+    architecture_records = [
+        report,
+        report["checkpoint"],
+        report["checkpoint"]["durable_s3"],
+        *report["ranks"],
+        *report["validation"],
+    ]
+    for row in architecture_records:
+        for key in ("input_channels", "masked_crops_per_recording", "masked_crop_samples"):
+            row["architecture"].pop(key, None)
+    path = tmp_path / "legacy-mono-report.json"
+    path.write_text(json.dumps(report))
+    assert (
+        len(verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=temporal)) == 64
+    )
+    report["ranks"][2]["architecture"] = report["ranks"][2]["architecture"] | {"input_channels": 2}
+    path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="streaming probe"):
+        verify_streaming_report(path, expected_index_sha256="a" * 64, temporal=temporal)

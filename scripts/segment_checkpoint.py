@@ -93,11 +93,14 @@ class CheckpointRepository:
         index_sha256: str,
         check,
         base_data_seed: int = 42,
+        global_batch: int = 64,
     ):
         if not RUN_ID.fullmatch(run_id) or not SHA.fullmatch(index_sha256):
             raise ValueError("Expected a stable run ID and frozen index SHA256")
         if type(base_data_seed) is not int or not 0 <= base_data_seed < 2**32 - 375000:
             raise ValueError("Expected a nonnegative bounded base data seed")
+        if type(global_batch) is not int or global_batch < 1:
+            raise ValueError("Expected a positive integer global recording batch")
         parts = prefix.split("/")
         if (
             len(parts) < 2
@@ -117,7 +120,7 @@ class CheckpointRepository:
             "run_id": run_id,
             "index_sha256": index_sha256,
             "total_optimizer_steps": 375000,
-            "global_batch": 64,
+            "global_batch": global_batch,
             "base_data_seed": base_data_seed,
             "data_seed_policy": "base_plus_resume_step",
         }

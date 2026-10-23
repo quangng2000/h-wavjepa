@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+  - audioset_temporal
+  - override /data: sharded_audio
+  - _self_
+
+# Nat masked anchor + temporal hierarchy. The chronological hierarchy remains
+# an audio extension; eight independent 2.01 s crops train the masked anchor.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, unbenchmarked]
+data:
+  index_path: ???
+  naturalistic_manifest: ???
+  num_samples: 145440
+  batch_size: 16
+  masked_crops_per_recording: 8
+  masked_crop_samples: 32160
+  num_workers: 1
+model:
+  backbone:
+    config:
+      input_channels: 2
+      window_samples: 16160
+  masked_crops_per_recording: 8
+  masked_crop_samples: 32160
+trainer:
+  max_epochs: -1
+  max_steps: 375000
+test: false

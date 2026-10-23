@@ -18,6 +18,14 @@ commercial-rights claim is made for pretrained weights or dependencies.
 Unrelated upstream denoising, data-loading and evaluation vendor packages are
 not imported. Source reuse does not imply upstream endorsement or reproduced results.
 
+The binaural frontend is the pinned official independent-channel extractor.
+`src/data/naturalistic_audio.py` adapts the pinned BSD-licensed scene helper's
+convolution, noise fading and mixture recipe. It retains two channels and uses
+one SNR gain across both ears; it does not import the mono denoising training
+objective. Source locations and changes are recorded in the module and
+[Nat guide](docs/WAVJEPA_NAT.md). Published BRIR metadata declares MIT; WHAM!
+noise is CC BY-NC 4.0. Dataset terms remain separate from this code's license.
+
 ## SIGReg: LeJEPA method, H-JEPA implementation
 
 Sketched Isotropic Gaussian Regularization was introduced by Randall Balestriero

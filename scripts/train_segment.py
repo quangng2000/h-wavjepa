@@ -99,6 +99,15 @@ def verify_streaming_report(path: Path, *, expected_index_sha256: str, temporal:
     from scripts.benchmark_streaming_gpu import require_architecture, temporal_loss_metrics
 
     report = json.loads(path.read_text())
+    if (
+        report.get("model_variant") == "nat_temporal_aggregation"
+        or report.get("architecture", {}).get("input_channels", 1) != 1
+        or report.get("architecture", {}).get("masked_crops_per_recording", 0) != 0
+    ):
+        raise ValueError(
+            "The production segment runner is mono-only; Nat requires its own accepted "
+            "hardware report and production budget plan"
+        )
     ranks, validation = report.get("ranks", []), report.get("validation", [])
     frozen, checkpoint = report.get("frozen_index", {}), report.get("checkpoint", {})
     durable = checkpoint.get("durable_s3", {})

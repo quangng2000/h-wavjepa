@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - audioset_nat_h100_four
+  - _self_
+
+tags: [audioset, wavjepa-nat, binaural, masked-only, four-h100, unbenchmarked]
+model:
+  backbone:
+    config:
+      window_samples: 32160
+  hierarchy: false
+  prediction_weights: [0.0, 0.0, 0.0]
+  regularization_weight: 0.0
+  temporal_variance_weight: 0.0
+  aggregation_windows: [1, 1, 1]

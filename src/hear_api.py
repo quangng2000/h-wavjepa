@@ -70,12 +70,15 @@ def load_model(
 
 
 def _validate_audio(audio: Tensor, model: HEARModel) -> None:
-    if not isinstance(audio, Tensor) or audio.ndim != 2 or min(audio.shape) < 1:
+    channels = model.encoder.backbone.config.get("input_channels", 1)
+    if not isinstance(audio, Tensor) or audio.ndim not in (2, 3) or min(audio.shape) < 1:
         raise ValueError("audio must be a nonempty [sounds, samples] tensor")
+    if audio.ndim == 3 and (channels != 2 or audio.shape[1] != 2):
+        raise ValueError("Stereo input requires a binaural model and exactly two channels")
     if audio.dtype != torch.float32 or not torch.isfinite(audio).all():
         raise ValueError("audio must contain finite float32 samples")
     if torch.any(audio.abs() > 1.0):
-        raise ValueError("HEAR audio must be mono samples in [-1, 1]")
+        raise ValueError("HEAR audio must be samples in [-1, 1]")
     if model.training or model.encoder.training:
         raise ValueError("HEAR extraction requires model.eval()")
     if model.device.type not in {"cpu", "cuda"}:
@@ -114,7 +117,8 @@ def _window_readouts(audio: Tensor, model: HEARModel, starts: list[int]) -> Tens
             windows = torch.stack(
                 [
                     F.pad(
-                        recording[start : start + size], (0, max(0, start + size - len(recording)))
+                        recording[..., start : start + size],
+                        (0, max(0, start + size - recording.shape[-1])),
                     )
                     for start in batch_starts
                 ]
@@ -138,12 +142,19 @@ def _window_readouts(audio: Tensor, model: HEARModel, starts: list[int]) -> Tens
 def _token_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, Tensor]:
     backbone = model.encoder.backbone
     local_times = backbone.token_timestamps_ms().float().cpu()
+    channels = backbone.config.get("input_channels", 1)
+    if channels == 2:
+        local_times = local_times[: len(local_times) // 2]
     count = len(local_times)
     hop = count * backbone.stride_samples
     # Overlap only enough to retain a continuous frontend token grid between
     # independently encoded windows, rather than fabricating interpolated tokens.
-    starts = list(range(0, audio.shape[1], hop))
+    starts = list(range(0, audio.shape[-1], hop))
     windows = _window_readouts(audio, model, starts)
+    if channels == 2:
+        # Both ear tokens describe the same time. Match their grid before
+        # averaging; never treat the second ear as a later part of the clip.
+        windows = windows.reshape(*windows.shape[:2], 2, count, windows.shape[-1]).mean(dim=2)
     embeddings = windows.flatten(1, 2)
     times = (
         torch.tensor(starts, dtype=torch.float32)[:, None] * (1000.0 / model.sample_rate)
@@ -154,14 +165,14 @@ def _token_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, Tensor]:
         torch.arange(len(times), dtype=torch.long) * backbone.stride_samples
         + backbone.receptive_field_samples
     )
-    valid = ends <= audio.shape[1]
+    valid = ends <= audio.shape[-1]
     if valid.any():
         embeddings, times = embeddings[:, valid], times[valid]
     else:
         # HEAR accepts arbitrarily short clips. One padded context token is
         # unavoidable below the frontend receptive field; report the clip center.
         embeddings = embeddings[:, :1]
-        times = torch.tensor([(audio.shape[1] - 1) * 500.0 / model.sample_rate])
+        times = torch.tensor([(audio.shape[-1] - 1) * 500.0 / model.sample_rate])
     return embeddings, times.expand(audio.shape[0], -1).clone()
 
 
@@ -178,15 +189,17 @@ def get_timestamp_embeddings(audio: Tensor, model: HEARModel) -> tuple[Tensor, T
     mode retains valid tokens on its native frontend grid.
     """
     _validate_audio(audio, model)
+    if model.encoder.backbone.config.get("input_channels", 1) == 2 and audio.ndim == 2:
+        audio = audio[:, None].expand(-1, 2, -1)
     if model.representation == "backbone":
         return _token_embeddings(audio, model)
     size = model.encoder.window_samples
-    complete = audio.shape[1] // size
+    complete = audio.shape[-1] // size
     starts = [index * size for index in range(max(1, complete))]
     values = _window_readouts(audio, model, starts)
     support = model.support_windows
     if len(starts) < support or complete == 0:
-        times = torch.tensor([(audio.shape[1] - 1) * 500.0 / model.sample_rate])
+        times = torch.tensor([(audio.shape[-1] - 1) * 500.0 / model.sample_rate])
     else:
         # Dense state i spans [i, i + support) low windows, even though its
         # training-grid identity is the physical endpoint i + support - 1.
@@ -205,14 +218,16 @@ def get_scene_embeddings(audio: Tensor, model: HEARModel) -> Tensor:
     additional duration; an evaluation-only left repeat handles short clips.
     """
     _validate_audio(audio, model)
+    if model.encoder.backbone.config.get("input_channels", 1) == 2 and audio.ndim == 2:
+        audio = audio[:, None].expand(-1, 2, -1)
     if model.representation == "backbone":
         values, _ = _token_embeddings(audio, model)
         return values.mean(dim=1)
     size = model.encoder.window_samples
-    starts = list(range(0, audio.shape[1], size))
+    starts = list(range(0, audio.shape[-1], size))
     values = _window_readouts(audio, model, starts)
     endpoint_starts = starts[model.support_windows - 1 :] or starts[-1:]
     weights = torch.tensor(
-        [min(size, audio.shape[1] - start) for start in endpoint_starts], dtype=torch.float32
+        [min(size, audio.shape[-1] - start) for start in endpoint_starts], dtype=torch.float32
     )
     return (values * weights[None, :, None]).sum(dim=1) / weights.sum()

@@ -1,0 +1,27 @@
+# @package _global_
+defaults:
+  - audioset_nat
+  - override /trainer: h100_ddp
+  - _self_
+
+# Four recordings per rank: global 16 recordings / 128 masked crops.
+# Capacity and streaming throughput MUST be tested before a production launch.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, four-h100, unbenchmarked]
+data:
+  batch_size: 4
+model:
+  backbone:
+    config:
+      compact_masked_tokens: true
+      use_gradient_checkpointing: true
+  optimizer:
+    fused: false
+  training_metric_interval: 50
+  localereg_fixed_shape_kmeans: true
+trainer:
+  devices: 4
+  enable_progress_bar: false
+  check_val_every_n_epoch: null
+  val_check_interval: 5000
+callbacks:
+  rich_progress_bar: null

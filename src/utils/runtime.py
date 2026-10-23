@@ -237,8 +237,28 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
             raise ValueError("temporal variance requires at least two valid upper context states")
     if cfg.data.sample_rate != backbone.sample_rate:
         raise ValueError("data.sample_rate must match backbone.sample_rate")
+    crops = cfg.model.get("masked_crops_per_recording", 0)
+    crop_samples = cfg.model.get("masked_crop_samples")
+    if type(crops) is not int or crops < 0:
+        raise ValueError("masked_crops_per_recording must be a nonnegative integer")
+    if crops and (
+        type(crop_samples) is not int or crop_samples < 1 or cfg.model.masked_weight <= 0
+    ):
+        raise ValueError("Separate masked crops require a positive length and masked loss")
+    if crops != cfg.data.get("masked_crops_per_recording", 0) or crop_samples != cfg.data.get(
+        "masked_crop_samples"
+    ):
+        raise ValueError("Model and data masked crop recipes must match")
+    channels = backbone.get("input_channels", 1)
+    if channels not in (1, 2):
+        raise ValueError("backbone.input_channels must be 1 or 2")
+    if cfg.data.get("_target_") == "src.data.sharded_audio_datamodule.ShardedAudioDataModule":
+        naturalistic = cfg.data.get("naturalistic_manifest") is not None
+        if naturalistic != (channels == 2):
+            raise ValueError("Binaural staged training requires an explicit naturalistic manifest")
+    forecasting = any(cfg.model.prediction_weights) or cfg.model.regularization_weight or weight
     expected = backbone.window_samples * (cfg.model.context_windows + max(horizons))
-    if cfg.data.num_samples != expected:
+    if (forecasting or not crops) and cfg.data.num_samples != expected:
         raise ValueError(
             "data.num_samples must equal backbone.window_samples * "
             f"(context_windows + max(horizons)) = {expected}"

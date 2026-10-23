@@ -626,6 +626,11 @@ data = [
 hear = [
     { name = "soundfile" },
 ]
+nat = [
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "soundfile" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -648,13 +653,15 @@ requires-dist = [
     { name = "rich", specifier = ">=13,<15" },
     { name = "rootutils", specifier = ">=1.0.7,<2" },
     { name = "safetensors", specifier = ">=0.4.5,<1" },
+    { name = "scipy", marker = "extra == 'nat'", specifier = ">=1.11,<2" },
     { name = "soundfile", marker = "extra == 'hear'", specifier = ">=0.12,<1" },
+    { name = "soundfile", marker = "extra == 'nat'", specifier = ">=0.12,<1" },
     { name = "torch", specifier = ">=2.6,<3" },
     { name = "torchmetrics", specifier = ">=1.6,<2" },
     { name = "transformers", specifier = ">=4.45,<5" },
     { name = "webdataset", marker = "extra == 'data'", specifier = ">=1.0.2,<2" },
 ]
-provides-extras = ["hear", "data"]
+provides-extras = ["hear", "data", "nat"]
 
 [package.metadata.requires-dev]
 dev = [

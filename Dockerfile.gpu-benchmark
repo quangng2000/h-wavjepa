@@ -6,7 +6,7 @@ COPY pyproject.toml uv.lock requirements.txt .project-root ./
 # image's matched CUDA/Torch stack. Installation occurs during the CPU build.
 RUN python -c "import torch; print('Base Torch:', torch.__version__, 'CUDA:', torch.version.cuda, flush=True); assert torch.__version__ == '2.13.0+cu126' and torch.version.cuda == '12.6'" \
     && python -c "import tomllib; p=tomllib.load(open('uv.lock','rb'))['package']; skip={'torch','torchvision','torchaudio','triton'}; open('/tmp/smoke-constraints.txt','w').write('\n'.join(x['name']+'=='+x['version']+(' ; '+' or '.join(x['resolution-markers']) if x.get('resolution-markers') else '') for x in p if 'version' in x and x['name'] not in skip and not x['name'].startswith(('nvidia-','cuda-'))) + '\ntorch==2.13.0+cu126\n')" \
-    && python -m pip install --break-system-packages --no-cache-dir -c /tmp/smoke-constraints.txt -r requirements.txt pytest boto3 webdataset psutil \
+    && python -m pip install --break-system-packages --no-cache-dir -c /tmp/smoke-constraints.txt -r requirements.txt pytest boto3 webdataset psutil scipy soundfile \
     && python -c "import torch, lightning, hydra; print('Installed Torch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Lightning:', lightning.__version__, 'Hydra:', hydra.__version__, flush=True); assert torch.__version__ == '2.13.0+cu126' and torch.version.cuda == '12.6'" \
     && python -m pip freeze > /app/smoke-environment.txt
 COPY src/ src/

@@ -43,6 +43,17 @@ from scripts.segment_checkpoint import (  # noqa: E402
 )
 
 
+def probe_variant(args) -> tuple[bool, bool, int]:
+    """Nat is a distinct four-rank, binaural, eight-crop hardware workload."""
+    nat = getattr(args, "nat", False)
+    manifest = getattr(args, "naturalistic_manifest", None)
+    if nat and (args.devices != 4 or manifest is None):
+        raise ValueError("Nat requires four GPUs and an explicit --naturalistic-manifest")
+    if not nat and manifest is not None:
+        raise ValueError("--naturalistic-manifest requires --nat; mono fallback is forbidden")
+    return nat, nat or getattr(args, "temporal", False), 16 if nat else 64
+
+
 def durable_checkpoint_options(args) -> dict | None:
     fields = ("checkpoint_bucket", "checkpoint_prefix", "checkpoint_run_id")
     values = [getattr(args, field, None) for field in fields]
@@ -80,6 +91,7 @@ def open_checkpoint_repository(args, frozen: dict) -> CheckpointRepository | Non
         checkpoint_client(args.checkpoint_endpoint),
         **options,
         index_sha256=frozen["frozen_index_sha256"],
+        global_batch=probe_variant(args)[2],
         check=check,
     )
     repository.open(initialize=True)
@@ -119,7 +131,150 @@ def _cache_inventory(directory: Path, rank: int) -> dict:
     return {"verified_files": len(sizes), "verified_bytes": sum(sizes)}
 
 
-def freeze_index(output: Path, endpoint: str, *, devices: int, workers: int) -> dict:
+def _nat_asset_catalog(manifest: Path, expected_sha256: str) -> dict:
+    """Classify remote cache objects without downloading any BRIR or noise."""
+    from src.data.naturalistic_audio import NaturalisticAudio
+
+    renderer = NaturalisticAudio(manifest, require_asset_checksums=True)
+    if not renderer.remote_assets or renderer.manifest_sha256 != expected_sha256:
+        raise RuntimeError("Nat streaming acceptance requires the pinned remote asset manifest")
+    groups = {"noise": set(renderer.noise_files), "brir": set()}
+    for scenes in renderer.scenes.values():
+        for scene in scenes:
+            groups["brir"].update((scene.source_rir, *scene.noise_rirs))
+    objects = {}
+    for kind, paths in groups.items():
+        for path in paths:
+            asset = renderer.assets[path]
+            value = {"kind": kind, "bytes": asset["bytes"]}
+            if asset["sha256"] in objects and objects[asset["sha256"]] != value:
+                raise RuntimeError("Nat object identity is ambiguous between BRIR and noise")
+            objects[asset["sha256"]] = value
+    return {
+        "manifest_sha256": renderer.manifest_sha256,
+        "bucket": renderer.bucket,
+        "endpoint": renderer.endpoint,
+        "objects": objects,
+    }
+
+
+def _nat_cache_inventory(directory: Path, rank: int, catalog: dict) -> dict:
+    """Inspect only checksum-verified, atomically enrolled remote cache objects.
+
+    _ShardCache publishes these final .tar names only after full SHA-256 readback.
+    Comparing object identities, rather than file counts, still detects new
+    downloads when a bounded cache evicts an older asset before enrolling one.
+    """
+    result = {"contracts": 0, "brir": {}, "noise": {}}
+    for cache in directory.glob(f"train/rank-{rank}/worker-*/nat"):
+        marker = cache / "contract.json"
+        if not marker.exists():
+            continue
+        contract = json.loads(marker.read_text())
+        if any(
+            contract.get(key) != catalog[key] for key in ("manifest_sha256", "bucket", "endpoint")
+        ):
+            raise RuntimeError("Nat remote cache contract differs from the pinned manifest")
+        result["contracts"] += 1
+        for path in cache.glob("*.tar"):
+            asset = catalog["objects"].get(path.stem)
+            if asset is None or path.is_symlink():
+                raise RuntimeError("Unexpected object in Nat's owned remote cache")
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                continue  # The input worker may evict a verified file during this snapshot.
+            if size != asset["bytes"]:
+                raise RuntimeError("Nat remote cache object size differs from its manifest")
+            identity = f"{cache.parent.name}/{path.stem}"
+            result[asset["kind"]][identity] = size
+    return result
+
+
+def _nat_streaming_facts(warm: dict, final: dict, manifest_sha256: str) -> dict:
+    def compact(snapshot):
+        return {
+            "remote_cache_contracts": snapshot["contracts"],
+            **{
+                kind: {
+                    "verified_files": len(snapshot[kind]),
+                    "verified_bytes": sum(snapshot[kind].values()),
+                }
+                for kind in ("brir", "noise")
+            },
+        }
+
+    return {
+        "manifest_sha256": manifest_sha256,
+        "warmup": compact(warm),
+        "train_end": compact(final),
+        "new_verified_brir_objects_after_warmup": len(final["brir"].keys() - warm["brir"].keys()),
+        "new_verified_noise_objects_after_warmup": len(
+            final["noise"].keys() - warm["noise"].keys()
+        ),
+    }
+
+
+def _ear_cnns(model):
+    cnns = model.backbone.model.extract_audio.cnns
+    if len(cnns) != 2 or not set(p.data_ptr() for p in cnns[0].parameters()).isdisjoint(
+        p.data_ptr() for p in cnns[1].parameters()
+    ):
+        raise RuntimeError("Nat requires two independent ear CNN parameter sets")
+    return cnns
+
+
+def _ear_update_facts(model, initial: list[list[torch.Tensor]]) -> list[dict]:
+    facts = []
+    for ear, (cnn, saved) in enumerate(zip(_ear_cnns(model), initial, strict=True)):
+        parameters = list(cnn.parameters())
+        facts.append(
+            {
+                "ear": ear,
+                "independent_parameters": True,
+                "parameter_tensors": len(parameters),
+                "changed_parameter_tensors": sum(
+                    not torch.equal(before, after.detach())
+                    for before, after in zip(saved, parameters, strict=True)
+                ),
+                "all_parameters_finite": bool(
+                    torch.stack([torch.isfinite(p).all() for p in parameters]).all()
+                ),
+            }
+        )
+    return facts
+
+
+def _require_nat_training_evidence(report: dict, manifest_sha256: str) -> None:
+    assets = report.get("nat_asset_streaming", {})
+    ears = report.get("ear_cnn_updates", [])
+    if assets.get("manifest_sha256") != manifest_sha256:
+        raise RuntimeError("Nat remote asset streaming evidence is missing or mismatched")
+    final = assets.get("train_end", {})
+    if final.get("remote_cache_contracts", 0) < 1:
+        raise RuntimeError("Nat rank did not access the remote BRIR/noise cache")
+    for kind in ("brir", "noise"):
+        count = assets.get(f"new_verified_{kind}_objects_after_warmup", 0)
+        if (
+            type(count) is not int
+            or count < 1
+            or count > final.get(kind, {}).get("verified_files", 0)
+            or final.get(kind, {}).get("verified_bytes", 0) <= 0
+        ):
+            raise RuntimeError(f"Nat rank did not prove a new remote {kind} download after warmup")
+    if len(ears) != 2 or any(
+        row.get("ear") != ear
+        or row.get("independent_parameters") is not True
+        or row.get("all_parameters_finite") is not True
+        or not 0 < row.get("changed_parameter_tensors", 0) <= row.get("parameter_tensors", 0)
+        for ear, row in enumerate(ears)
+    ):
+        raise RuntimeError("Nat rank did not prove finite updates to both independent ear CNNs")
+
+
+def freeze_index(
+    output: Path, endpoint: str, *, devices: int, workers: int, global_batch: int = 64
+) -> dict:
     from src.data.sharded_audio_datamodule import _read_index, _validate_index
 
     location = f"s3://{os.environ['HWAVJEPA_INDEX_BUCKET']}/{os.environ['HWAVJEPA_INDEX_KEY']}"
@@ -128,7 +283,7 @@ def freeze_index(output: Path, endpoint: str, *, devices: int, workers: int) -> 
     if len(splits["train"]) < devices * workers:
         raise ValueError("The frozen pilot needs at least one training shard per rank/worker")
     validation_clips = sum(shard["splits"]["val"]["clips"] for shard in splits["val"])
-    if validation_clips < 64:
+    if validation_clips < global_batch:
         raise ValueError("The frozen pilot needs at least one global validation batch")
     path = output / "frozen-index.json"
     atomic_report(path, index)
@@ -142,17 +297,21 @@ def freeze_index(output: Path, endpoint: str, *, devices: int, workers: int) -> 
         "split_counts": index["split_counts"],
         "training_shards": len(splits["train"]),
         "validation_clips": validation_clips,
-        "validation_used_clips": validation_clips // 64 * 64,
-        "validation_excluded_tail_clips": validation_clips % 64,
+        "validation_used_clips": validation_clips // global_batch * global_batch,
+        "validation_excluded_tail_clips": validation_clips % global_batch,
+        "global_recording_batch": global_batch,
     }
     atomic_report(output / "frozen-index-receipt.json", summary)
     return summary
 
 
 def make_config(args, frozen: dict, cache: Path):
-    temporal = getattr(args, "temporal", False)
-    experiment = f"audioset_{'temporal_' if temporal else ''}h100_"
-    experiment += "four" if args.devices == 4 else "fast"
+    nat, temporal, global_batch = probe_variant(args)
+    if nat:
+        experiment = "audioset_nat_h100_four"
+    else:
+        experiment = f"audioset_{'temporal_' if temporal else ''}h100_"
+        experiment += "four" if args.devices == 4 else "fast"
     with initialize_config_dir(version_base="1.3", config_dir=str(ROOT / "configs")):
         cfg = compose(
             config_name="train",
@@ -173,13 +332,20 @@ def make_config(args, frozen: dict, cache: Path):
             "warmup": args.warmup,
             "frozen_sha256": frozen["frozen_index_sha256"],
             "temporal": temporal,
+            "nat": nat,
+            "naturalistic_sha256": frozen.get("naturalistic_manifest_sha256"),
+            "naturalistic_manifest": str(args.naturalistic_manifest) if nat else None,
         }
     }
     cfg.data.index_path = frozen["path"]
     cfg.data.endpoint = args.endpoint
     cfg.data.cache_dir = str(cache)
     cfg.data.cache_max_gib = 40
-    cfg.data.batch_size = 64 // args.devices
+    cfg.data.batch_size = global_batch // args.devices
+    if nat:
+        cfg.data.naturalistic_manifest = str(
+            Path(args.naturalistic_manifest).expanduser().resolve()
+        )
     cfg.data.num_workers = args.workers
     cfg.data.allow_partial_index = True
     cfg.data.allow_stream_restart_on_resume = False
@@ -194,8 +360,11 @@ def make_config(args, frozen: dict, cache: Path):
         "_target_": "datetime.timedelta",
         "seconds": collective_timeout_seconds(args),
     }
-    cfg.model.backbone.config.use_gradient_checkpointing = False
-    cfg.model.backbone.config.compact_masked_tokens = args.compact
+    # The Nat preset needs the unbenchmarked capacity-saving path; never silently
+    # turn it off while pretending the mono probe measures the same workload.
+    if not nat:
+        cfg.model.backbone.config.use_gradient_checkpointing = False
+        cfg.model.backbone.config.compact_masked_tokens = args.compact
     cfg.ckpt_path, cfg.train, cfg.test = None, True, False
     if (
         cfg.model.lr_total_steps != 375000
@@ -209,6 +378,9 @@ def make_config(args, frozen: dict, cache: Path):
 def architecture_facts(model) -> dict:
     """Read instantiated geometry, not merely the requested command-line flag."""
     return {
+        "input_channels": model.backbone.config.get("input_channels", 1),
+        "masked_crops_per_recording": model.masked_crops_per_recording,
+        "masked_crop_samples": model.masked_crop_samples,
         "aggregation_windows": list(model.aggregation_windows),
         "level_support_windows": list(model.level_support_windows),
         "temporal_variance_weight": model.temporal_variance_weight,
@@ -225,8 +397,20 @@ def architecture_facts(model) -> dict:
     }
 
 
-def require_architecture(facts: dict, *, temporal: bool) -> None:
+def require_architecture(facts: dict, *, temporal: bool, nat: bool = False) -> None:
+    temporal = temporal or nat
+    if not nat:
+        # Older passing mono probes predate explicit channel/crop metadata. Only
+        # absent fields receive mono defaults; declared Nat values never do.
+        facts = {
+            "input_channels": 1,
+            "masked_crops_per_recording": 0,
+            "masked_crop_samples": None,
+        } | facts
     expected = {
+        "input_channels": 2 if nat else 1,
+        "masked_crops_per_recording": 8 if nat else 0,
+        "masked_crop_samples": 32160 if nat else None,
         "aggregation_windows": [1, 2, 2] if temporal else [1, 1, 1],
         "level_support_windows": [1, 2, 4] if temporal else [1, 1, 1],
         "temporal_variance_weight": 0.1 if temporal else 0.0,
@@ -262,10 +446,24 @@ def temporal_loss_metrics(metrics: dict, *, stage: str) -> dict:
 
 
 class StreamingTimings(L.Callback):
-    def __init__(self, output, cache, steps, warmup, frozen_sha256, temporal=False):
+    def __init__(
+        self,
+        output,
+        cache,
+        steps,
+        warmup,
+        frozen_sha256,
+        temporal=False,
+        nat=False,
+        naturalistic_sha256=None,
+        naturalistic_manifest=None,
+    ):
         self.output, self.cache = Path(output), Path(cache)
         self.steps, self.warmup, self.frozen_sha = steps, warmup, frozen_sha256
-        self.temporal = temporal
+        self.nat, self.temporal = nat, temporal or nat
+        self.naturalistic_sha256 = naturalistic_sha256
+        self.naturalistic_manifest = naturalistic_manifest
+        self.global_batch = self.global_masked_crops = None
         self.temporal_samples = []
         self.ends, self.started = [], None
         self.validation_clips = self.validation_batches = 0
@@ -282,13 +480,37 @@ class StreamingTimings(L.Callback):
     def on_train_start(self, trainer, pl_module):
         self.worker_facts = worker_facts(trainer.train_dataloader)
         self.architecture = architecture_facts(pl_module)
-        require_architecture(self.architecture, temporal=self.temporal)
+        require_architecture(self.architecture, temporal=self.temporal, nat=self.nat)
+        if self.nat and (
+            not self.naturalistic_sha256
+            or trainer.datamodule.state_dict().get("naturalistic_sha256")
+            != self.naturalistic_sha256
+        ):
+            raise RuntimeError("Nat data module did not use the pinned naturalistic manifest")
         torch.cuda.synchronize()
         self.wall_started = time.perf_counter()
         self.initial = next(pl_module.backbone.model.encoder.parameters()).detach().clone()
+        if self.nat:
+            self.nat_catalog = _nat_asset_catalog(
+                self.naturalistic_manifest, self.naturalistic_sha256
+            )
+            self.initial_ears = [
+                [parameter.detach().clone() for parameter in cnn.parameters()]
+                for cnn in _ear_cnns(pl_module)
+            ]
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         torch.cuda.synchronize()
+        self.global_batch = (
+            batch["waveform"].shape[0] * trainer.world_size * trainer.accumulate_grad_batches
+        )
+        self.global_masked_crops = self.global_batch * pl_module.masked_crops_per_recording
+        if self.nat and (
+            batch["waveform"].shape[1:] != (2, pl_module.sample_windows * pl_module.window_samples)
+            or "masked_crops" not in batch
+            or batch["masked_crops"].shape[1:] != (8, 2, 32160)
+        ):
+            raise RuntimeError("Nat probe requires binaural chronology and eight masked crops")
         if self.temporal and (
             trainer.global_step == 1
             or trainer.global_step % pl_module.training_metric_interval == 0
@@ -326,6 +548,10 @@ class StreamingTimings(L.Callback):
             )
         if trainer.global_step == self.warmup:
             self.warm_cache = _cache_inventory(self.cache, trainer.global_rank)
+            if self.nat:
+                self.warm_nat_cache = _nat_cache_inventory(
+                    self.cache, trainer.global_rank, self.nat_catalog
+                )
             torch.cuda.reset_peak_memory_stats()
             self.started = time.perf_counter()
         elif trainer.global_step > self.warmup:
@@ -355,7 +581,9 @@ class StreamingTimings(L.Callback):
             "temporal_training_samples": self.temporal_samples,
             "rank": trainer.global_rank,
             "world_size": trainer.world_size,
-            "global_batch": 64,
+            "global_batch": self.global_batch,
+            "global_masked_crops": self.global_masked_crops,
+            "naturalistic_manifest_sha256": self.naturalistic_sha256,
             "optimizer_steps": trainer.global_step,
             "ema_updates": int(pl_module.ema_updates),
             "warmup_steps": self.warmup,
@@ -375,6 +603,13 @@ class StreamingTimings(L.Callback):
             "rank_cache_at_train_end": end_cache,
             "cache_refills_observed_after_warmup": refills,
         }
+        if self.nat:
+            report["nat_asset_streaming"] = _nat_streaming_facts(
+                self.warm_nat_cache,
+                _nat_cache_inventory(self.cache, trainer.global_rank, self.nat_catalog),
+                self.naturalistic_sha256,
+            )
+            report["ear_cnn_updates"] = _ear_update_facts(pl_module, self.initial_ears)
         atomic_report(self.output / f"rank-{trainer.global_rank}.json", report)
 
 
@@ -477,7 +712,12 @@ def summarize(
     *,
     require_durable_checkpoint: bool = False,
     temporal: bool = False,
+    nat: bool = False,
 ) -> dict:
+    temporal = temporal or nat
+    expected_batch = 16 if nat else 64
+    if nat and devices != 4:
+        raise RuntimeError("Nat acceptance requires four GPUs")
     ranks = [json.loads((output / f"rank-{rank}.json").read_text()) for rank in range(devices)]
     validation = [
         json.loads((output / f"validation-rank-{rank}.json").read_text()) for rank in range(devices)
@@ -494,8 +734,21 @@ def summarize(
             raise RuntimeError("Rank reports disagree on topology, progress or frozen dataset")
         if not train.get("online_weights_changed") or not train.get("all_model_parameters_finite"):
             raise RuntimeError("A rank did not prove finite parameter updates")
+        if train.get("global_batch") != expected_batch:
+            raise RuntimeError("Rank reports a different global recording batch")
+        if nat and (
+            train.get("global_masked_crops") != 128
+            or not frozen.get("naturalistic_manifest_sha256")
+            or any(
+                row.get("naturalistic_manifest_sha256") != frozen["naturalistic_manifest_sha256"]
+                for row in (train, val)
+            )
+        ):
+            raise RuntimeError("Nat rank crops or naturalistic manifest identity differ")
+        if nat:
+            _require_nat_training_evidence(train, frozen["naturalistic_manifest_sha256"])
         for row in (train, val):
-            require_architecture(row.get("architecture", {}), temporal=temporal)
+            require_architecture(row.get("architecture", {}), temporal=temporal, nat=nat)
         if temporal:
             samples = train.get("temporal_training_samples", [])
             if not samples or samples[0].get("optimizer_step") != 1:
@@ -534,7 +787,7 @@ def summarize(
         or checkpoint.get("bytes", 0) <= 0
     ):
         raise RuntimeError("Checkpoint roundtrip evidence is missing")
-    require_architecture(checkpoint.get("architecture", {}), temporal=temporal)
+    require_architecture(checkpoint.get("architecture", {}), temporal=temporal, nat=nat)
     if require_durable_checkpoint:
         durable = checkpoint.get("durable_s3", {})
         receipt = durable.get("receipt", {})
@@ -550,14 +803,19 @@ def summarize(
                 )
             )
             or receipt.get("owner", {}).get("index_sha256") != frozen["frozen_index_sha256"]
+            or receipt.get("owner", {}).get("global_batch") != expected_batch
             or receipt.get("checkpoint", {}).get("step") != steps
             or receipt.get("checkpoint", {}).get("bytes") != checkpoint["bytes"]
         ):
             raise RuntimeError("Durable S3 checkpoint roundtrip evidence is missing or mismatched")
-        require_architecture(durable.get("architecture", {}), temporal=temporal)
+        require_architecture(durable.get("architecture", {}), temporal=temporal, nat=nat)
     return {
         "ok": True,
-        "model_variant": "temporal_aggregation" if temporal else "pointwise",
+        "model_variant": "nat_temporal_aggregation"
+        if nat
+        else ("temporal_aggregation" if temporal else "pointwise"),
+        "global_recording_batch": expected_batch,
+        "global_masked_crops": 128 if nat else 0,
         "architecture": ranks[0]["architecture"],
         "data_worker_start_method": "spawn",
         "workers_per_rank": ranks[0]["workers_per_rank"],
@@ -586,7 +844,7 @@ def run(args):
     from src.train import train
 
     checkpoint_required = durable_checkpoint_options(args) is not None
-    temporal = getattr(args, "temporal", False)
+    nat, temporal, global_batch = probe_variant(args)
     collective_seconds = collective_timeout_seconds(args)
     rank, local_rank, world = (int(os.environ[key]) for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"))
     if world != args.devices or torch.cuda.device_count() < args.devices:
@@ -605,9 +863,19 @@ def run(args):
             setup[0] = {
                 "scratch": str(scratch),
                 "frozen": freeze_index(
-                    args.output, args.endpoint, devices=world, workers=args.workers
+                    args.output,
+                    args.endpoint,
+                    devices=world,
+                    workers=args.workers,
+                    global_batch=global_batch,
                 ),
             }
+            if nat:
+                manifest = Path(args.naturalistic_manifest).expanduser().resolve()
+                setup[0]["frozen"]["naturalistic_manifest_sha256"] = hashlib.sha256(
+                    manifest.read_bytes()
+                ).hexdigest()
+                atomic_report(args.output / "frozen-index-receipt.json", setup[0]["frozen"])
             repository = open_checkpoint_repository(args, setup[0]["frozen"])
         except Exception as error:
             if scratch is not None:
@@ -638,9 +906,9 @@ def run(args):
         fit_started = time.perf_counter()
         if rank == 0:
             print(
-                f"streaming train start: devices={world} global_batch=64 "
+                f"streaming train start: devices={world} global_batch={global_batch} "
                 f"steps={args.steps} warmup={args.warmup} workers_per_rank={args.workers} "
-                f"compact_masked_tokens={args.compact} temporal_aggregation={temporal}",
+                f"compact_masked_tokens={True if nat else args.compact} temporal_aggregation={temporal} nat={nat}",
                 flush=True,
             )
         _, objects = train(make_config(args, frozen, cache))
@@ -677,6 +945,7 @@ def run(args):
                 "optimizer_steps": trainer.global_step,
                 "ema_updates": int(model.ema_updates),
                 "frozen_index_sha256": frozen["frozen_index_sha256"],
+                "naturalistic_manifest_sha256": datamodule.state_dict().get("naturalistic_sha256"),
                 "seconds": time.perf_counter() - validation_started,
                 "metrics": metrics,
                 "clips": timing.validation_clips,
@@ -744,8 +1013,10 @@ def run(args):
                 frozen,
                 require_durable_checkpoint=checkpoint_required,
                 temporal=temporal,
+                nat=nat,
             )
-            summary["compact_masked_tokens"] = args.compact
+            summary["compact_masked_tokens"] = model.backbone.config["compact_masked_tokens"]
+            summary["gradient_checkpointing"] = model.backbone.config["use_gradient_checkpointing"]
             summary["workers_per_rank"] = args.workers
             summary["hardware"] = {
                 "torch": str(torch.__version__),
@@ -763,7 +1034,7 @@ def run(args):
         dist.destroy_process_group()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--devices", type=int, choices=(2, 4), required=True)
     parser.add_argument("--compact", action="store_true")
@@ -772,7 +1043,19 @@ def main():
         action="store_true",
         help="Use the temporal AudioSet preset: causal 1/2/4-window support and a 0.1 variance weight",
     )
-    parser.add_argument("--steps", type=int, default=400)
+    parser.add_argument(
+        "--nat", action="store_true", help="Probe WavJEPA-Nat temporal training on four GPUs"
+    )
+    parser.add_argument(
+        "--naturalistic-manifest",
+        type=Path,
+        help="Pinned local binaural scene/noise asset manifest",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        help="Updates to measure (default: 400 mono, 600 Nat so four recordings/rank refill shards)",
+    )
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
@@ -797,10 +1080,13 @@ def main():
         default=600,
         help="Combined publication, full readback, download and strict verification budget",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.steps is None:
+        args.steps = 600 if args.nat else 400
     if not 1 <= args.warmup < args.steps <= 1000 or not 1 <= args.workers <= 4:
         parser.error("Require 1 <= warmup < steps <= 1000 and 1 <= workers <= 4")
     try:
+        probe_variant(args)
         durable_checkpoint_options(args)
     except ValueError as error:
         parser.error(str(error))

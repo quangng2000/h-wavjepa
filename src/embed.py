@@ -86,6 +86,10 @@ def extract_embeddings(
     }
     if model_family == "dynamics":
         record.update(
+            input_channels=model.backbone.config.get("input_channels", 1),
+            input_adaptation="mono duplicated to both ears"
+            if model.backbone.config.get("input_channels", 1) == 2
+            else "mono",
             aggregation_windows=list(model.aggregation_windows),
             level_support_windows=list(model.level_support_windows),
             training_state_strides=list(model.state_strides),
@@ -103,6 +107,13 @@ def extract_embeddings(
             with torch.inference_mode():
                 for number, batch in enumerate(loader):
                     waveform = batch["waveform"].to(device)
+                    if (
+                        model_family == "dynamics"
+                        and model.backbone.config.get("input_channels", 1) == 2
+                    ):
+                        # HEAR-compatible inference on clean mono sources only;
+                        # this duplication is never used for Nat pretraining.
+                        waveform = waveform[:, None].expand(-1, 2, -1)
                     encoded = (
                         {"levels": model.encode(waveform, subsample=True), "protected": None}
                         if model_family == "dynamics"

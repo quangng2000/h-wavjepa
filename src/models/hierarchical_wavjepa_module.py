@@ -69,6 +69,8 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "temporal_variance_weight": 0.0,
         "temporal_std_floor": 0.1,
         "temporal_variance_epsilon": 1e-4,
+        "masked_crops_per_recording": 0,
+        "masked_crop_samples": None,
     }
 
     def __init__(
@@ -106,8 +108,23 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         temporal_variance_weight: float = 0.0,
         temporal_std_floor: float = 0.1,
         temporal_variance_epsilon: float = 1e-4,
+        masked_crops_per_recording: int = 0,
+        masked_crop_samples: int | None = None,
     ) -> None:
         super().__init__()
+        if type(masked_crops_per_recording) is not int or masked_crops_per_recording < 0:
+            raise ValueError("masked_crops_per_recording must be a nonnegative integer")
+        if masked_crops_per_recording:
+            if (
+                type(masked_crop_samples) is not int
+                or masked_crop_samples < 1
+                or masked_weight <= 0
+            ):
+                raise ValueError("Separate masked crops require a positive length and masked loss")
+        elif masked_crop_samples is not None:
+            raise ValueError("masked_crop_samples requires masked_crops_per_recording")
+        self.masked_crops_per_recording = masked_crops_per_recording
+        self.masked_crop_samples = masked_crop_samples
         if type(training_metric_interval) is not int or training_metric_interval < 1:
             raise ValueError("training_metric_interval must be a positive integer")
         # This changes observation frequency, not the loss, optimizer or model
@@ -291,6 +308,8 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "predictor_heads": predictor_heads,
             "prediction_weights": list(prediction_weights),
             "masked_weight": self.masked_weight,
+            "masked_crops_per_recording": self.masked_crops_per_recording,
+            "masked_crop_samples": self.masked_crop_samples,
             "regularization_weight": self.regularization_weight,
             "regularization_scope": regularization_scope,
             "ema_decay": self.ema_decay,
@@ -339,13 +358,18 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                 )
 
     def _windows(self, waveform: Tensor, expected: int | None = None) -> Tensor:
-        if waveform.ndim != 2 or waveform.shape[0] < 1:
-            raise ValueError("waveform must be nonempty [batch, samples]")
+        channels = self.backbone.config.get("input_channels", 1)
+        if waveform.ndim != (2 if channels == 1 else 3) or waveform.shape[0] < 1:
+            raise ValueError("waveform must be [batch, samples] or binaural [batch, 2, samples]")
+        if channels == 2 and waveform.shape[1] != 2:
+            raise ValueError("Binaural waveforms require exactly two channels")
         if waveform.dtype != torch.float32 or not torch.isfinite(waveform).all():
             raise ValueError("waveform must contain finite float32 samples")
-        if not waveform.shape[1] or waveform.shape[1] % self.window_samples:
+        if not waveform.shape[-1] or waveform.shape[-1] % self.window_samples:
             raise ValueError("waveform must contain complete contiguous audio windows")
-        windows = waveform.reshape(waveform.shape[0], -1, self.window_samples)
+        windows = waveform.unfold(-1, self.window_samples, self.window_samples)
+        if channels == 2:
+            windows = windows.transpose(1, 2)
         if expected is not None and windows.shape[1] != expected:
             raise ValueError(f"expected exactly {expected} windows, got {windows.shape[1]}")
         return windows
@@ -483,7 +507,12 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         return self.predict(waveform)
 
     def compute_loss(
-        self, waveform: Tensor, seed: int | None = None, *, diagnostics: bool = False
+        self,
+        waveform: Tensor,
+        seed: int | None = None,
+        *,
+        diagnostics: bool = False,
+        masked_crops: Tensor | None = None,
     ) -> dict[str, Any]:
         distributed_training = (
             self.training
@@ -491,20 +520,47 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             and dist.is_available()
             and dist.is_initialized()
         )
-        if distributed_training:
-            valid_shape = (
-                waveform.ndim == 2
-                and waveform.shape[0] > 0
-                and waveform.shape[1] == self.required_samples
-                and waveform.dtype == torch.float32
+        channels = self.backbone.config.get("input_channels", 1)
+        forecasting = bool(
+            any(self.prediction_weights)
+            or self.regularization_weight
+            or self.temporal_variance_weight
+        )
+        valid_shape = (
+            waveform.ndim == (2 if channels == 1 else 3)
+            and waveform.shape[0] > 0
+            and waveform.shape[-1] > 0
+            and (channels == 1 or waveform.shape[1] == 2)
+            and (
+                not forecasting
+                and self.masked_crops_per_recording
+                or waveform.shape[-1] == self.required_samples
             )
-            valid = torch.isfinite(waveform).all() & valid_shape
+            and waveform.dtype == torch.float32
+        )
+        valid = torch.isfinite(waveform).all() & bool(valid_shape)
+        if self.masked_crops_per_recording:
+            expected = (waveform.shape[0], self.masked_crops_per_recording)
+            expected += (() if channels == 1 else (2,)) + (self.masked_crop_samples,)
+            valid_crops = isinstance(masked_crops, Tensor) and tuple(masked_crops.shape) == expected
+            valid_crops = (
+                valid_crops
+                and masked_crops.dtype == torch.float32
+                and masked_crops.device == waveform.device
+            )
+            valid &= torch.isfinite(masked_crops).all() if valid_crops else False
+        elif masked_crops is not None:
+            valid &= False
+        if distributed_training:
             if not all_ranks_true(valid):
-                raise ValueError(
-                    "invalid waveform on at least one training rank; expected finite float32 "
-                    f"[batch, {self.required_samples}] samples"
-                )
-        windows = self._windows(waveform, self.sample_windows)
+                raise ValueError("invalid waveform or masked crops on at least one training rank")
+        elif not bool(valid):
+            raise ValueError("Invalid waveform shape, finite float32 samples or masked crop recipe")
+        windows = (
+            self._windows(waveform, self.sample_windows)
+            if forecasting or not self.masked_crops_per_recording
+            else None
+        )
         if seed is None and not self.training:
             seed = self.eval_seed
         if seed is not None and (type(seed) is not int or not 0 <= seed < 2**32):
@@ -512,7 +568,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         zero = waveform.new_zeros(())
         teacher_windows = None
         if self.masked_weight:
-            masked, teacher_windows = self.backbone.masked_loss_with_targets(windows, seed=seed)
+            if self.masked_crops_per_recording:
+                masked = self.backbone.masked_loss(masked_crops, seed=seed)
+            else:
+                masked, teacher_windows = self.backbone.masked_loss_with_targets(windows, seed=seed)
         else:
             masked = zero
         terms, reg_terms, temporal_terms = [zero] * 3, [zero] * 3, [zero] * 3
@@ -526,7 +585,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         ):
             # Encode ONLY the prefix for the online forecasting path. The separate
             # masked anchor may use all windows, but shares no contextual activations.
-            prefix = waveform[:, : self.context_windows * self.window_samples]
+            prefix = waveform[..., : self.context_windows * self.window_samples]
             if self.aggregation_windows != (1, 1, 1) or self.temporal_variance_weight:
                 dense_levels = self.encode(prefix)
                 levels = self._subsample_levels(dense_levels, self.context_windows)
@@ -723,7 +782,12 @@ class HierarchicalWavJEPAModule(L.LightningModule):
 
     def _shared_step(self, batch: dict[str, Tensor], stage: str, batch_idx: int) -> Tensor:
         seed = None if stage == "train" else (self.eval_seed + batch_idx) % 2**32
-        result = self.compute_loss(batch["waveform"], seed=seed, diagnostics=stage != "train")
+        result = self.compute_loss(
+            batch["waveform"],
+            seed=seed,
+            diagnostics=stage != "train",
+            masked_crops=batch.get("masked_crops"),
+        )
         if (
             stage == "train"
             and self.global_step != self._initial_training_step
@@ -912,6 +976,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("checkpoint metadata must contain finite plain data") from error
         normalized = deepcopy(metadata)
         normalized["backbone"].setdefault("compact_masked_tokens", False)
+        normalized["backbone"].setdefault("input_channels", 1)
         normalized["dynamics"] = cls.OPTIONAL_CONFIG_DEFAULTS | normalized["dynamics"]
         if normalized["dynamics"]["regularizer_kind"] != (
             "localereg" if is_local else "sigreg"

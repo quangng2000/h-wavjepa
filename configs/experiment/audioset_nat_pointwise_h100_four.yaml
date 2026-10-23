@@ -1,0 +1,7 @@
+# @package _global_
+defaults:
+  - audioset_nat_h100_four
+  - _self_
+tags: [audioset, wavjepa-nat, binaural, pointwise-control, four-h100, unbenchmarked]
+model:
+  aggregation_windows: [1, 1, 1]

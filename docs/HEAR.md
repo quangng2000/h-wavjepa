@@ -126,6 +126,15 @@ therefore processes each file separately and batches only its fixed-size windows
 It does not treat silence as padding or trim it. Outputs are float32 CPU tensors;
 only `window_batch_size` windows are moved to the accelerator at a time.
 
+For a **Nat checkpoint**, mono HEAR input is explicitly copied into both ears,
+matching the released model's mono evaluation convention. The Python API also
+accepts native `[sounds, 2, samples]` stereo; it preserves both channels and their
+relative level. Backbone timestamp embeddings average aligned left/right tokens
+on one time grid, rather than treating the second ear as later audio. The file
+exporter currently reads mono HEAR WAVs and records this duplication in its
+metadata. This compatibility operation does not replace naturalistic training
+or constitute evaluation on NatHEAR's spatialized tasks.
+
 ## Tests
 
 ```bash

@@ -364,6 +364,9 @@ def _decode(
     seed: int,
     cycle: int,
     random_crop: bool,
+    naturalistic=None,
+    crops_per_recording: int = 0,
+    crop_samples: int | None = None,
 ):
     if len(raw) > 2 * sample_rate * 30 + 65536:
         raise ValueError("Audio member exceeds the 30 second preparation contract")
@@ -382,13 +385,34 @@ def _decode(
         if random_crop and slack:
             digest = hashlib.blake2b(f"{seed}:{cycle}:{name}".encode(), digest_size=8).digest()
             offset = int.from_bytes(digest, "little") % (slack + 1)
-        handle.setpos(offset)
-        pcm = handle.readframes(num_samples)
-        if len(pcm) != num_samples * 2:
+        full_clip = naturalistic is not None or crops_per_recording > 0
+        handle.setpos(0 if full_clip else offset)
+        read_samples = frames if full_clip else num_samples
+        pcm = handle.readframes(read_samples)
+        if len(pcm) != read_samples * 2:
             raise ValueError("Truncated PCM audio")
     if sys.byteorder != "little":
         raise RuntimeError("The streaming PCM decoder requires a little-endian host")
-    return {"waveform": torch.frombuffer(bytearray(pcm), dtype=torch.int16).float().div_(32768.0)}
+    audio = torch.frombuffer(bytearray(pcm), dtype=torch.int16).float().div_(32768.0)
+    if naturalistic is not None:
+        digest = hashlib.blake2b(f"scene:{seed}:{cycle}:{name}".encode(), digest_size=8).digest()
+        generator = torch.Generator().manual_seed(int.from_bytes(digest, "little"))
+        # Render the complete recording before selecting any excerpts. All crops
+        # share one physical scene and retain the preceding reverberation tail.
+        audio = naturalistic(audio, generator=generator)
+    result = {"waveform": audio[..., offset : offset + num_samples] if full_clip else audio}
+    if crops_per_recording:
+        if crop_samples is None or crop_samples > frames:
+            raise ValueError("Masked crops require enough real audio; padding is forbidden")
+        digest = hashlib.blake2b(f"crops:{seed}:{cycle}:{name}".encode(), digest_size=8).digest()
+        generator = torch.Generator().manual_seed(int.from_bytes(digest, "little"))
+        starts = torch.randint(
+            frames - crop_samples + 1, (crops_per_recording,), generator=generator
+        )
+        result["masked_crops"] = torch.stack(
+            [audio[..., start : start + crop_samples] for start in starts.tolist()]
+        )
+    return result
 
 
 class _AudioStream(IterableDataset):
@@ -413,6 +437,21 @@ class _AudioStream(IterableDataset):
             Path(self.config["cache_dir"]) / self.split / f"rank-{self.rank}" / f"worker-{worker}"
         )
         directory.mkdir(parents=True, exist_ok=True)
+        naturalistic = None
+        if self.config.get("naturalistic_manifest") is not None:
+            from src.data.naturalistic_audio import NaturalisticAudio
+
+            naturalistic = NaturalisticAudio(
+                self.config["naturalistic_manifest"],
+                sample_rate=self.config["sample_rate"],
+                require_asset_checksums=True,
+                cache_dir=str(directory / "nat"),
+                cache_max_gib=self.config["naturalistic_cache_per_consumer_gib"],
+                cache_min_free_gib=self.config["cache_min_free_gib"],
+                download_timeout_seconds=self.config["download_timeout_seconds"],
+            )
+            if naturalistic.manifest_sha256 != self.config["naturalistic_sha256"]:
+                raise ValueError("Naturalistic asset manifest changed after data setup")
         with (directory / ".reader.lock").open("a") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -461,6 +500,9 @@ class _AudioStream(IterableDataset):
                         self.config["seed"],
                         cycle,
                         self.split == "train" and self.config["train_random_crop"],
+                        naturalistic=naturalistic,
+                        crops_per_recording=self.config.get("masked_crops_per_recording", 0),
+                        crop_samples=self.config.get("masked_crop_samples"),
                     )
                     emitted += 1
                     if self.quota is not None and emitted >= self.quota:
@@ -502,6 +544,10 @@ class ShardedAudioDataModule(L.LightningDataModule):
         allow_stream_restart_on_resume: bool = False,
         worker_timeout_seconds: float = 180,
         download_timeout_seconds: float = 120,
+        naturalistic_manifest: str | None = None,
+        masked_crops_per_recording: int = 0,
+        masked_crop_samples: int | None = None,
+        naturalistic_cache_gib: float = 12,
     ):
         super().__init__()
         for key, value in {
@@ -527,6 +573,17 @@ class ShardedAudioDataModule(L.LightningDataModule):
             raise ValueError("download_timeout_seconds must be less than worker_timeout_seconds")
         _positive_integer(num_workers, "num_workers", minimum=0)
         _positive_integer(seed, "seed", minimum=0)
+        _positive_integer(masked_crops_per_recording, "masked_crops_per_recording", minimum=0)
+        if masked_crops_per_recording:
+            _positive_integer(masked_crop_samples, "masked_crop_samples")
+            if masked_crop_samples > num_samples:
+                raise ValueError("masked_crop_samples cannot exceed the minimum recording length")
+        elif masked_crop_samples is not None:
+            raise ValueError("masked_crop_samples requires masked_crops_per_recording > 0")
+        if naturalistic_manifest is not None and (
+            not isinstance(naturalistic_manifest, str) or not naturalistic_manifest
+        ):
+            raise ValueError("naturalistic_manifest must be an explicit local manifest path")
         if prefetch_factor is not None:
             _positive_integer(prefetch_factor, "prefetch_factor")
         if num_workers == 0 and (persistent_workers or prefetch_factor is not None):
@@ -537,6 +594,11 @@ class ShardedAudioDataModule(L.LightningDataModule):
             raise ValueError("batch_size must be >= minimum_batch_size")
         if not 0 < cache_max_gib <= 60 or not 0 <= cache_min_free_gib:
             raise ValueError("cache_max_gib must be in (0, 60]; cache_min_free_gib must be >= 0")
+        if (
+            not isinstance(naturalistic_cache_gib, (int, float))
+            or not 0 < naturalistic_cache_gib <= 20
+        ):
+            raise ValueError("naturalistic_cache_gib must be in (0, 20]")
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.query:
             raise ValueError("S3 endpoint must be an HTTPS origin without credentials")
@@ -558,8 +620,28 @@ class ShardedAudioDataModule(L.LightningDataModule):
         self._restored_state = None
         self._stream_seed = seed
         self.evaluation_coverage = {}
+        self.naturalistic_sha256 = None
 
     def setup(self, stage=None):
+        world = self.trainer.world_size if self.trainer else 1
+        rank = self.trainer.global_rank if self.trainer else 0
+        consumers = world * (max(1, self.hparams.num_workers) + 2)
+        augmentation = None
+        if self.hparams.naturalistic_manifest is not None:
+            from src.data.naturalistic_audio import NaturalisticAudio
+
+            # Fail before model allocation/training, without a mono fallback.
+            augmentation = NaturalisticAudio(
+                self.hparams.naturalistic_manifest,
+                sample_rate=self.hparams.sample_rate,
+                require_asset_checksums=True,
+                cache_max_gib=self.hparams.naturalistic_cache_gib / consumers,
+            )
+            if augmentation.split != "train":
+                raise ValueError(
+                    "Nat pretraining requires training-scene assets; reserve test rooms for evaluation"
+                )
+            self.naturalistic_sha256 = augmentation.manifest_sha256
         if self.index is None:
             self.index, self.index_sha256 = _read_index(
                 self.hparams.index_path,
@@ -569,8 +651,17 @@ class ShardedAudioDataModule(L.LightningDataModule):
             self.shards = _validate_index(
                 self.index, self.hparams.endpoint, self.hparams.allow_partial_index
             )
-        world = self.trainer.world_size if self.trainer else 1
-        rank = self.trainer.global_rank if self.trainer else 0
+        if (
+            augmentation is not None
+            and augmentation.remote_assets
+            and (
+                augmentation.bucket != self.index["bucket"]
+                or augmentation.endpoint.rstrip("/") != self.hparams.endpoint.rstrip("/")
+            )
+        ):
+            raise ValueError(
+                "Nat assets must use the AudioSet bucket and endpoint for the shared read-only key"
+            )
         self.world_size, self.rank = world, rank
         global_batch = world * self.hparams.batch_size
         self.evaluation_coverage = {
@@ -581,7 +672,6 @@ class ShardedAudioDataModule(L.LightningDataModule):
             }
             for split in ("val", "test")
         }
-        consumers = world * (max(1, self.hparams.num_workers) + 2)
         self.cache_budget = int(self.hparams.cache_max_gib * GIB) // consumers
         largest = max(shard["bytes"] for split in SPLITS for shard in self.shards[split])
         if largest > self.cache_budget:
@@ -600,6 +690,11 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "num_workers": self.hparams.num_workers,
             "cache_max_gib": self.hparams.cache_max_gib,
         }
+        if self.naturalistic_sha256 is not None:
+            contract.update(
+                naturalistic_sha256=self.naturalistic_sha256,
+                naturalistic_cache_gib=self.hparams.naturalistic_cache_gib,
+            )
         directory = Path(self.hparams.cache_dir).expanduser().resolve()
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / ".contract.lock").open("a") as lock:
@@ -624,11 +719,20 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "configured_seed": self.hparams.seed,
             "stream_seed": self._stream_seed,
             "evaluation_coverage": self.evaluation_coverage,
+            "naturalistic_sha256": self.naturalistic_sha256,
+            "masked_crops_per_recording": self.hparams.masked_crops_per_recording,
+            "masked_crop_samples": self.hparams.masked_crop_samples,
         }
 
     def _check_resume(self, state):
         if state.get("index_sha256") != self.index_sha256:
             raise ValueError("Checkpoint was trained with a different staged data index")
+        if (
+            state.get("naturalistic_sha256") != self.naturalistic_sha256
+            or state.get("masked_crops_per_recording", 0) != self.hparams.masked_crops_per_recording
+            or state.get("masked_crop_samples") != self.hparams.masked_crop_samples
+        ):
+            raise ValueError("Checkpoint naturalistic assets or masked crop recipe changed")
         if not self.hparams.allow_stream_restart_on_resume:
             raise ValueError(
                 "Streaming positions are not checkpointed. Set allow_stream_restart_on_resume=true "
@@ -664,7 +768,14 @@ class ShardedAudioDataModule(L.LightningDataModule):
                 raise ValueError(f"Every {split} rank needs at least one complete batch")
             shards = _heldout_ranges(shards, split, self.rank, quota)
         config = dict(self.hparams)
-        config.update(bucket=self.index["bucket"], cache_dir=self.cache_dir)
+        config.update(
+            bucket=self.index["bucket"],
+            cache_dir=self.cache_dir,
+            naturalistic_sha256=self.naturalistic_sha256,
+        )
+        config["naturalistic_cache_per_consumer_gib"] = self.hparams.naturalistic_cache_gib / (
+            self.world_size * (max(1, self.hparams.num_workers) + 2)
+        )
         if split == "train":
             config["seed"] = self._stream_seed
         dataset = _AudioStream(

@@ -1,0 +1,410 @@
+{
+  "checked_at_utc": "2026-10-23T13:24:47.953299+00:00",
+  "status": "metadata_only_not_staged",
+  "metadata_source": "https://huggingface.co/api/datasets/labhamlet/GRAM-Naturalistic-Scenes-Binaural/tree/546f796991721befaffce60152af59bfd9ad64ff/train/webdataset_output?limit=1000",
+  "brir": {
+    "repository": "labhamlet/GRAM-Naturalistic-Scenes-Binaural",
+    "revision": "546f796991721befaffce60152af59bfd9ad64ff",
+    "license_metadata": "mit",
+    "gated": false,
+    "split": "train",
+    "shard_count": 70,
+    "source_bytes": 645192396800,
+    "expected_scene_count": 70000,
+    "expected_scene_count_verified": false,
+    "source_sample_rate_hz": 32000,
+    "sample_rate_evidence": "https://github.com/labhamlet/GRAM-T/blob/9d017173e9b405a86050d6d36aba3c01d02a8e6c/configs/data/audioset.yaml",
+    "inspected_prefix_bytes": 2048,
+    "first_member": {
+      "name": "00000d89-7610-4c7b-9293-6d204b57fe5a.npy",
+      "shape": [
+        6,
+        2,
+        96000
+      ],
+      "numpy_dtype": "<f8",
+      "npy_bytes": 9216128
+    },
+    "full_payload_verification": false,
+    "shards": [
+      {
+        "path": "train/webdataset_output/shard-000000.tar",
+        "bytes": 9217034240,
+        "sha256": "742c0107c75f680117818160b8dcb554c35e2871c4d27ec14e47376776977930"
+      },
+      {
+        "path": "train/webdataset_output/shard-000001.tar",
+        "bytes": 9217034240,
+        "sha256": "094240d52361fc50e23bd3677b3302ed3e3b8261faf39c772119ca17ad001c56"
+      },
+      {
+        "path": "train/webdataset_output/shard-000002.tar",
+        "bytes": 9217034240,
+        "sha256": "50d2194c4f98a34b0ffaa3afda36b647fc2cd89871ec49aa76716174d9e75433"
+      },
+      {
+        "path": "train/webdataset_output/shard-000003.tar",
+        "bytes": 9217034240,
+        "sha256": "85d5352bb530e0f3ab76af700b8e67d35df393b75380672bc35896469b9d2686"
+      },
+      {
+        "path": "train/webdataset_output/shard-000004.tar",
+        "bytes": 9217034240,
+        "sha256": "22f59a2a278ae5d8f7ba07fe72f6975312cf7a1d6de98d3b814a2b96cb7d139b"
+      },
+      {
+        "path": "train/webdataset_output/shard-000005.tar",
+        "bytes": 9217034240,
+        "sha256": "5eef87e9011eb8d7ab995765a8d79f68f618a456bf2e82c2f8110783ee4b3202"
+      },
+      {
+        "path": "train/webdataset_output/shard-000006.tar",
+        "bytes": 9217034240,
+        "sha256": "0008128de5e570499b8741cf0d5c0840706d6d3132123417ac9e4573f1dfa924"
+      },
+      {
+        "path": "train/webdataset_output/shard-000007.tar",
+        "bytes": 9217034240,
+        "sha256": "4f9ea0feab418a7ef0eedf44e3dd767fbac2a1125e5aba334763466a6fe83bd9"
+      },
+      {
+        "path": "train/webdataset_output/shard-000008.tar",
+        "bytes": 9217034240,
+        "sha256": "a25f94f84c32975ddf65501e1ed92011ea6ea018ab3aaf15f171c48c5f0abeb6"
+      },
+      {
+        "path": "train/webdataset_output/shard-000009.tar",
+        "bytes": 9217034240,
+        "sha256": "fde7d9f9e3e99aecd0c900bb4ec4a50d4b841a4041986511623d12eb010369e6"
+      },
+      {
+        "path": "train/webdataset_output/shard-000010.tar",
+        "bytes": 9217034240,
+        "sha256": "ff7f268c5080a3729e4ee98d0e75fb0684b201efcbcc6c9aa5265eaf636d84d7"
+      },
+      {
+        "path": "train/webdataset_output/shard-000011.tar",
+        "bytes": 9217034240,
+        "sha256": "4170e363fb99c412959649126449c152d7cc7efc86761f28366d21660c560521"
+      },
+      {
+        "path": "train/webdataset_output/shard-000012.tar",
+        "bytes": 9217034240,
+        "sha256": "393264b4b24a5fc7c9826b195ce59932e82c6d14efa615cbbdebd132ed43ff55"
+      },
+      {
+        "path": "train/webdataset_output/shard-000013.tar",
+        "bytes": 9217034240,
+        "sha256": "be9bdb2ab37f560a4dab397b2631933ee876b537242af1c8ed2be039ffe67b0a"
+      },
+      {
+        "path": "train/webdataset_output/shard-000014.tar",
+        "bytes": 9217034240,
+        "sha256": "8e4f43c304de0e8826351fdbe9bffce4c3f142cc59f43861b9265bbd912727c5"
+      },
+      {
+        "path": "train/webdataset_output/shard-000015.tar",
+        "bytes": 9217034240,
+        "sha256": "ba728d9fb82ad435156c8369a7729a08c239ff6c087596a625162373585803e0"
+      },
+      {
+        "path": "train/webdataset_output/shard-000016.tar",
+        "bytes": 9217034240,
+        "sha256": "021f6ae09cb6ad1762534381c8836017bfa968eb864030c42da9ed7870b21c94"
+      },
+      {
+        "path": "train/webdataset_output/shard-000017.tar",
+        "bytes": 9217034240,
+        "sha256": "8057adc7568d05ca2f3b9b5d4a441c28a4ba8a81685ae3185c8f2e7c34a6743c"
+      },
+      {
+        "path": "train/webdataset_output/shard-000018.tar",
+        "bytes": 9217034240,
+        "sha256": "5cfd219d386593dc51edfca20730d613994bc9c1108408ad246cc42301413ce4"
+      },
+      {
+        "path": "train/webdataset_output/shard-000019.tar",
+        "bytes": 9217034240,
+        "sha256": "f960521db47e5bc2758530768dfa50254bfc246bbc5234974e0b746fa57b8779"
+      },
+      {
+        "path": "train/webdataset_output/shard-000020.tar",
+        "bytes": 9217034240,
+        "sha256": "4442811cee1f70feedba40eb7448e2e11fb6f2890b0a918cf91d63aeb9d9abf7"
+      },
+      {
+        "path": "train/webdataset_output/shard-000021.tar",
+        "bytes": 9217034240,
+        "sha256": "66d89c58efae351a5e5d655a9a4c8f394b9109564c0d5f663e281ae1f31364ed"
+      },
+      {
+        "path": "train/webdataset_output/shard-000022.tar",
+        "bytes": 9217034240,
+        "sha256": "e097f1744e865a3f3a6295dbdc231179ae65b7d79297175852e10ae9772774f3"
+      },
+      {
+        "path": "train/webdataset_output/shard-000023.tar",
+        "bytes": 9217034240,
+        "sha256": "0a5a0680889f4db5a2b5ac38221550d70160d11213f8ff505ec9e609d0d3b662"
+      },
+      {
+        "path": "train/webdataset_output/shard-000024.tar",
+        "bytes": 9217034240,
+        "sha256": "a1f514f24dd11bdd02c8ccd3eb72fe8ba3573cd95f131a190b2b287bb5ae64c1"
+      },
+      {
+        "path": "train/webdataset_output/shard-000025.tar",
+        "bytes": 9217034240,
+        "sha256": "31d064c94516ab788f334f1ca9051c0b049d8d264956568c959e66168113a94a"
+      },
+      {
+        "path": "train/webdataset_output/shard-000026.tar",
+        "bytes": 9217034240,
+        "sha256": "bc89de91a96d52cff1ae162ee9650c1cd6e7594e6ad38b4f2431dbd5429a7707"
+      },
+      {
+        "path": "train/webdataset_output/shard-000027.tar",
+        "bytes": 9217034240,
+        "sha256": "d855a42a2749964e16c6ded6cb34d98f6939e843a7c958ce35a8f15046c1f7f5"
+      },
+      {
+        "path": "train/webdataset_output/shard-000028.tar",
+        "bytes": 9217034240,
+        "sha256": "e96732c33281d7de8fcb837fe294445669fd4004b1ed18c0e90311215d3f9ab3"
+      },
+      {
+        "path": "train/webdataset_output/shard-000029.tar",
+        "bytes": 9217034240,
+        "sha256": "f6f01116f5025d23d9b1297f8be969a30b6523e5f846343d179aef6efd0d5b9d"
+      },
+      {
+        "path": "train/webdataset_output/shard-000030.tar",
+        "bytes": 9217034240,
+        "sha256": "cded90e71375c89ec786322037aabdb1d2d121f118e78c089ff0ae31718df745"
+      },
+      {
+        "path": "train/webdataset_output/shard-000031.tar",
+        "bytes": 9217034240,
+        "sha256": "7444ca9d7bd6cc46a09ec0e3edf320b07e26aa2c930a7cc5b4ad4786b76cf815"
+      },
+      {
+        "path": "train/webdataset_output/shard-000032.tar",
+        "bytes": 9217034240,
+        "sha256": "7b77a3897fe4da05c3b3896d0cc2a551893cb25f92c91a8272ce123e2237a82b"
+      },
+      {
+        "path": "train/webdataset_output/shard-000033.tar",
+        "bytes": 9217034240,
+        "sha256": "fba2addab97717d7e1f7fb1811d2c308c8601e5562686931048da8d78124b6dc"
+      },
+      {
+        "path": "train/webdataset_output/shard-000034.tar",
+        "bytes": 9217034240,
+        "sha256": "f2175909e3bf5ef12e616e628747e9e0b1c3159b0b0ba4640ab345e6d151fda9"
+      },
+      {
+        "path": "train/webdataset_output/shard-000035.tar",
+        "bytes": 9217034240,
+        "sha256": "39c4cd8920ffa8e116018773d4e9fe858933b1d84bdc1524e7a93529d4a3a1ec"
+      },
+      {
+        "path": "train/webdataset_output/shard-000036.tar",
+        "bytes": 9217034240,
+        "sha256": "e8b43e51d87765aab5c59e6c779563669ddfb23bb772550515052ac74639a18a"
+      },
+      {
+        "path": "train/webdataset_output/shard-000037.tar",
+        "bytes": 9217034240,
+        "sha256": "58e70a42ede47c4ef54fe356a0ba0cb6aee226bfc4e6c982feb24285bcb49501"
+      },
+      {
+        "path": "train/webdataset_output/shard-000038.tar",
+        "bytes": 9217034240,
+        "sha256": "51e2133fbbe4c9666fcf620beb2aeb0accb12c1bdbbad17d13d300031196062c"
+      },
+      {
+        "path": "train/webdataset_output/shard-000039.tar",
+        "bytes": 9217034240,
+        "sha256": "ebdc1ed6b331858460f9d787e3f66127ce948879d16dfd79ca83da86bde17a45"
+      },
+      {
+        "path": "train/webdataset_output/shard-000040.tar",
+        "bytes": 9217034240,
+        "sha256": "b91e2fa223330fcdbcf194e31c523f56ca82dad949f885b5c15ebfe219d1477b"
+      },
+      {
+        "path": "train/webdataset_output/shard-000041.tar",
+        "bytes": 9217034240,
+        "sha256": "ade29b338cedb76fc4a38b4542d9d081e7a88d8dab4220c69af07ad781f002a5"
+      },
+      {
+        "path": "train/webdataset_output/shard-000042.tar",
+        "bytes": 9217034240,
+        "sha256": "90375b9c14e669a6d8c8a4a4769b579892cc43833849f314cffdaa4aa0e601c9"
+      },
+      {
+        "path": "train/webdataset_output/shard-000043.tar",
+        "bytes": 9217034240,
+        "sha256": "8e20816dc77f330f93a0dba80b68ac239c1a3dce9685389a071851058402752d"
+      },
+      {
+        "path": "train/webdataset_output/shard-000044.tar",
+        "bytes": 9217034240,
+        "sha256": "f090baff317409789c70ceaa699484ff91b81ced8f09df5a95b571275b835244"
+      },
+      {
+        "path": "train/webdataset_output/shard-000045.tar",
+        "bytes": 9217034240,
+        "sha256": "73090ebae7462e9d304d9ffa4f10be0a3b69ff1657fdb9411dcfe4793a11ed6f"
+      },
+      {
+        "path": "train/webdataset_output/shard-000046.tar",
+        "bytes": 9217034240,
+        "sha256": "81ed2820047061144a0bc524bf4b3cd261dd186d44b7d765c68d6c77619f53aa"
+      },
+      {
+        "path": "train/webdataset_output/shard-000047.tar",
+        "bytes": 9217034240,
+        "sha256": "394f7fe2afeee019868e848d9caa7d33e82abe2430d99d0bd956b650ccf1657e"
+      },
+      {
+        "path": "train/webdataset_output/shard-000048.tar",
+        "bytes": 9217034240,
+        "sha256": "639dd9502d2d22cc48359c56d5907d17144eb22e7d6b8a50bf057e5dacd7b2bd"
+      },
+      {
+        "path": "train/webdataset_output/shard-000049.tar",
+        "bytes": 9217034240,
+        "sha256": "2a866110d757d051256483cfd81f6530f918a1be18eaedc415951700a306f05f"
+      },
+      {
+        "path": "train/webdataset_output/shard-000050.tar",
+        "bytes": 9217034240,
+        "sha256": "d3136765593278e0286c4f9986c197d0b419a94ec074cd93ed40dabc73d7d8f7"
+      },
+      {
+        "path": "train/webdataset_output/shard-000051.tar",
+        "bytes": 9217034240,
+        "sha256": "65051eaebcbd0e695fc7a1d184601501e3ec41c2825cde8e665e3cdba2213908"
+      },
+      {
+        "path": "train/webdataset_output/shard-000052.tar",
+        "bytes": 9217034240,
+        "sha256": "ed59f3fb303413792759f5822b22af95f6035a16d119fcf0c6f9f1fc153dc667"
+      },
+      {
+        "path": "train/webdataset_output/shard-000053.tar",
+        "bytes": 9217034240,
+        "sha256": "e4679022634972ebef87d2c63d83583564948a8ac81b724e95d2baccc6d46fe2"
+      },
+      {
+        "path": "train/webdataset_output/shard-000054.tar",
+        "bytes": 9217034240,
+        "sha256": "9f341ca82ce89bec0f50fa2bb1d9f93e2f11e06d800969e375f97232d1041c95"
+      },
+      {
+        "path": "train/webdataset_output/shard-000055.tar",
+        "bytes": 9217034240,
+        "sha256": "99313aa092d393e7c44138ec3d0fe6f9dda9cf0592b7db1d7f759e7ecaa99944"
+      },
+      {
+        "path": "train/webdataset_output/shard-000056.tar",
+        "bytes": 9217034240,
+        "sha256": "48a69d305cb6b32489c2dbcc09996fb89e93e9c1957a3501f34a3587954c7caa"
+      },
+      {
+        "path": "train/webdataset_output/shard-000057.tar",
+        "bytes": 9217034240,
+        "sha256": "fb908c1f9dffef211b9947dde2efbda9dbe543a022c75147efd2db57afc67acf"
+      },
+      {
+        "path": "train/webdataset_output/shard-000058.tar",
+        "bytes": 9217034240,
+        "sha256": "8621718da677a3a1c5ed490f56e408d20339c8f7848691e5553416288d641456"
+      },
+      {
+        "path": "train/webdataset_output/shard-000059.tar",
+        "bytes": 9217034240,
+        "sha256": "1ff3e44a3953cc2d91b4151cbc0cbf549231b872fcdee30356d6a4e776116625"
+      },
+      {
+        "path": "train/webdataset_output/shard-000060.tar",
+        "bytes": 9217034240,
+        "sha256": "d9dfa84c566dd99419c67e35b5a7e6fd00ea1485a2881110340292775887938b"
+      },
+      {
+        "path": "train/webdataset_output/shard-000061.tar",
+        "bytes": 9217034240,
+        "sha256": "4d7cf4a212172550f24d6937c13f64946a682fddd565f437c63561e6a5cd7030"
+      },
+      {
+        "path": "train/webdataset_output/shard-000062.tar",
+        "bytes": 9217034240,
+        "sha256": "fe19f2c99e2804a5df3d139a060c75337b83a68a100bf1a28071e062987ffedc"
+      },
+      {
+        "path": "train/webdataset_output/shard-000063.tar",
+        "bytes": 9217034240,
+        "sha256": "b3fc4b64661db05b15d07e224b159cae6f38fe6af8b37c30719f60dd46dbdf9a"
+      },
+      {
+        "path": "train/webdataset_output/shard-000064.tar",
+        "bytes": 9217034240,
+        "sha256": "db406acf36371647fa33b3d62af45829d29d3b303c45cff88fb1ad37ed53294d"
+      },
+      {
+        "path": "train/webdataset_output/shard-000065.tar",
+        "bytes": 9217034240,
+        "sha256": "96942034ca22431cf7e610650e655edf9bf3055cabca188aea59d20fecc9e0e4"
+      },
+      {
+        "path": "train/webdataset_output/shard-000066.tar",
+        "bytes": 9217034240,
+        "sha256": "fe5dc1ffa269a53567c169fc2e1fff1f4fee6d8539b2f20b5ff1ab7298b7ee44"
+      },
+      {
+        "path": "train/webdataset_output/shard-000067.tar",
+        "bytes": 9217034240,
+        "sha256": "0244e5e93c5ac93b61f36c4b947f69422ea9622b949c602f9aec17fda49ad52a"
+      },
+      {
+        "path": "train/webdataset_output/shard-000068.tar",
+        "bytes": 9217034240,
+        "sha256": "1795e1fbfdcb70dee0014fd141da96cdff0a07a3bc0078b4640c96567eeaf1f1"
+      },
+      {
+        "path": "train/webdataset_output/shard-000069.tar",
+        "bytes": 9217034240,
+        "sha256": "9e657d87a909cbdb330cbc4b7c5f8b23aed93cad76dfa93a88282570d7a38801"
+      }
+    ]
+  },
+  "alternative_raw_brirs": {
+    "repository": "labhamlet/BinauralRIRs",
+    "revision": "77fe93dd3363bca8b6922ab8bb084fc264ca2fbe",
+    "tar_count": 31,
+    "root_files_bytes": 337445142965,
+    "license_metadata": "mit",
+    "train_house_metadata_files": 70,
+    "test_house_metadata_files": 15,
+    "full_payload_verification": false
+  },
+  "noise": {
+    "name": "WHAM! noise corpus",
+    "publisher_page": "http://wham.whisper.ai/",
+    "download_url": "https://my-bucket-a8b4b49c25c811ee9a7e8bba05fa24c7.s3.amazonaws.com/wham_noise.zip",
+    "download_bytes": 18194930748,
+    "published_md5": "d5af15645d521d3920e01954c6cd7594",
+    "license": "CC-BY-NC-4.0",
+    "train_files": 20000,
+    "train_duration_hours": 58.03,
+    "sample_rate_hz": 16000,
+    "channels": 2,
+    "full_payload_verification": false
+  },
+  "engineering_size_estimate": {
+    "brir_float32_16khz_3s_uncompressed_payload_bytes": 161280000000,
+    "assumptions": "Exactly 70,000 arrays shaped (6,2,96000), resampled 32k to16k and castfloat32, preserving3seconds. Before TARheaders, manifests, compression or sparsepaddingremoval; count andcompletepayloadstillunverified."
+  },
+  "upstream_gram_t_revision": "9d017173e9b405a86050d6d36aba3c01d02a8e6c"
+}

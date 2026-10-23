@@ -120,14 +120,16 @@ class TimeInverseBlockMasker(nn.Module):
         combined_visible_mask = torch.logical_xor(final_context_mask.unsqueeze(1), target_positions)
 
         # Channel based masking repeats the mask for the other channel, and then flattens it
-        # This assumes that our extractor also flattens the channels. Thus, we will mask the same time points.
+        # ConvChannelFeatureExtractor concatenates complete channel sequences.
+        # Keep that channel-major order; the upstream (S C) order incorrectly
+        # interleaves the masks relative to its (C S) feature layout.
         if self.channel_based_masking:
             final_context_mask = rearrange(repeat(final_context_mask, "B S -> B C S", C = in_channels), 
-                                          "B C S -> B (S C)")
+                                          "B C S -> B (C S)")
             target_positions = rearrange(repeat(target_positions, "B N S -> B C N S", C = in_channels),
-                                              "B C N S -> B N (S C)")
+                                              "B C N S -> B N (C S)")
             combined_visible_mask = rearrange(repeat(combined_visible_mask, "B N S -> B C N S", C = in_channels),
-                                              "B C N S -> B N (S C)")
+                                              "B C N S -> B N (C S)")
 
         return final_context_mask, target_positions, combined_visible_mask.to(torch.bool)
     

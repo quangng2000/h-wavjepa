@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import lightning.pytorch as pl
 
-from src.vendor.wavjepa.pos_embed import get_1d_sincos_pos_embed_from_grid
+from src.vendor.wavjepa.pos_embed import get_1d_sincos_pos_embed_from_grid, get_binaural_sincos_pos_embed
 from src.vendor.wavjepa.functions import trunc_normal_
 from src.vendor.wavjepa.extractors.audio_extractor import Extractor
 from src.vendor.wavjepa.types import ForwardReturn, TransformerLayerCFG, TransformerEncoderCFG
@@ -94,6 +94,7 @@ class JEPA(pl.LightningModule):
         size : str = "base",
         target_length: Optional[int] = None,
         compact_masked_tokens: bool = False,
+        position_channels: int = 1,
         **kwargs : dict[str, Any],
     ):
         super().__init__(**kwargs)
@@ -108,6 +109,11 @@ class JEPA(pl.LightningModule):
             int(resample_sr * process_audio_seconds) if target_length is None else target_length
         )
         self.total_patches = feature_extractor.total_patches(self.target_length)
+        if type(position_channels) is not int or position_channels not in (1, 2):
+            raise ValueError("position_channels must be 1 or 2")
+        if self.total_patches % position_channels:
+            raise ValueError("token count must be divisible by position_channels")
+        self.position_channels = position_channels
         self.use_compiled_forward = compile_modules
         self.use_gradient_checkpointing = use_gradient_checkpointing
         if type(compact_masked_tokens) is not bool:
@@ -182,11 +188,16 @@ class JEPA(pl.LightningModule):
             ),
             requires_grad=False,
         )
-        positions = np.arange(self.total_patches, dtype=np.float64)
-        pos_embed_data = get_1d_sincos_pos_embed_from_grid(
-            embedding_dim,
-            positions,
-        )
+        if self.position_channels == 2:
+            pos_embed_data = get_binaural_sincos_pos_embed(
+                embedding_dim, self.total_patches // 2
+            )
+        else:
+            positions = np.arange(self.total_patches, dtype=np.float64)
+            pos_embed_data = get_1d_sincos_pos_embed_from_grid(
+                embedding_dim,
+                positions,
+            )
         pos_embed.data.copy_(torch.from_numpy(pos_embed_data).float().unsqueeze(0))
         return pos_embed
 
@@ -382,7 +393,7 @@ class JEPA(pl.LightningModule):
         return total_loss / (indices_count + 1e-8)
     
 
-    def forward(self, audio : torch.Tensor, ctx_masks, target_indices, ctx_and_target_masks) -> ForwardReturn:
+    def forward(self, audio : torch.Tensor, ctx_masks, target_indices, ctx_and_target_masks, *, position_embeddings=None) -> ForwardReturn:
         """
         Args:
             batch: torch.Tensor
@@ -413,7 +424,13 @@ class JEPA(pl.LightningModule):
         if self.post_extraction_mapper is not None:
             local_features = self.post_extraction_mapper(local_features)
         
-        local_features = local_features + self.pos_encoding_encoder
+        encoder_positions, decoder_positions = (
+            (self.pos_encoding_encoder, self.pos_encoding_decoder)
+            if position_embeddings is None else position_embeddings
+        )
+        if encoder_positions.shape != (1, local_features.shape[1], self.encoder_embedding_dim):
+            raise ValueError("encoder positions do not match extracted tokens")
+        local_features = local_features + encoder_positions
         contextual_features = self.encoder_forward(local_features, src_key_padding_mask=ctx_masks)
         # Accumulate contextual features on the batch dimensions
         contextual_features = contextual_features[~ctx_masks]
@@ -422,7 +439,8 @@ class JEPA(pl.LightningModule):
         preds = self.decoder_forward(contextual_features, 
                                      ctx_masks, 
                                      nr_targets = target_indices.shape[1], 
-                                     src_key_padding_mask=ctx_and_target_masks)
+                                     src_key_padding_mask=ctx_and_target_masks,
+                                     position_embedding=decoder_positions)
         
         # Compute the training targets using the teacher.
         x_targets = local_features.detach()
@@ -439,15 +457,19 @@ class JEPA(pl.LightningModule):
         )
 
 
-    def decoder_forward(self, contextual_features: torch.Tensor, ctx_mask: torch.BoolTensor, nr_targets : int, src_key_padding_mask : Optional[torch.BoolTensor] = None) -> torch.Tensor:
+    def decoder_forward(self, contextual_features: torch.Tensor, ctx_mask: torch.BoolTensor, nr_targets : int, src_key_padding_mask : Optional[torch.BoolTensor] = None, position_embedding=None) -> torch.Tensor:
         B = ctx_mask.shape[0]
+        token_count = ctx_mask.shape[1]
         # Prepare the mask tokens.
-        tgt = self.mask_token.repeat(B, self.total_patches, 1).type_as(contextual_features) # (B, seq_len, decoder_dim)
+        tgt = self.mask_token.repeat(B, token_count, 1).type_as(contextual_features) # (B, seq_len, decoder_dim)
         #Get the context tokens.
         tgt[~ctx_mask, :] = contextual_features.reshape((-1, self.decoder_embedding_dim))
         tgt = tgt.reshape((B, -1, self.decoder_embedding_dim))
         # Add positional encoding to the decoder
-        tgt = tgt + self.pos_encoding_decoder
+        positions = self.pos_encoding_decoder if position_embedding is None else position_embedding
+        if positions.shape != (1, token_count, self.decoder_embedding_dim):
+            raise ValueError("decoder positions do not match target tokens")
+        tgt = tgt + positions
 
         # Repeat the context for every target, and absorb into batch dimension
         tgt = repeat(tgt, 'B Seq Emb -> B T Seq Emb', T = nr_targets)
