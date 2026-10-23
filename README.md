@@ -69,6 +69,8 @@ For pretrained two-GPU training, add `model.backbone.pretrained=true` to `audios
 
 Keep data, initialization, horizons, batch population, and budgets matched across comparisons. Resume with `ckpt_path=/path/last.ckpt` and a new run directory, retaining the original planned schedule.
 
+Validation logs [temporal diagnostics](docs/TEMPORAL_DIAGNOSTICS.md): within/between-recording variance, persistence error, and sensitivity to context order. New flat controls regularize the shared space once; old checkpoints preserve their original loss definition.
+
 ## Evaluate and develop
 
 - [HEAR](docs/HEAR.md): frozen scene/timestamp embeddings and official downstream evaluation.
@@ -91,3 +93,5 @@ uv run ruff format --check .
 ```
 
 The [legacy prototype](src/legacy/README.md) remains accessible through explicit `smoke`, `audio`, `hwavjepa`, and `flat` experiments. Its checkpoint family is separate. Active sinusoidal positions use an independently implemented formula; dependency and checkpoint provenance remain documented in the notices.
+
+Project code is [MIT licensed](LICENSE). Vendored code and external weights retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md).

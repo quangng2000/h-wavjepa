@@ -29,7 +29,8 @@ from src.objectives.localereg import SOURCE_COMMIT as LOCALEREG_COMMIT
 from src.objectives.localereg import LocaLeReg
 from src.objectives.sigreg import SOURCE_COMMIT as SIGREG_COMMIT
 from src.objectives.sigreg import SIGReg
-from src.utils.runtime import require_finite_gradients
+from src.objectives.temporal_diagnostics import forecast_diagnostics, recording_variance
+from src.utils.runtime import all_ranks_true, require_finite_gradients
 
 
 class HierarchicalWavJEPAModule(L.LightningModule):
@@ -61,6 +62,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "localereg_n_quad": 256,
         "localereg_fixed_shape_kmeans": False,
         "readout_mode": "legacy",
+        "regularization_scope": "per_level",
     }
 
     def __init__(
@@ -93,6 +95,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         localereg_fixed_shape_kmeans: bool = False,
         readout_mode: str = "legacy",
         training_metric_interval: int = 1,
+        regularization_scope: str = "unique_spaces",
     ) -> None:
         super().__init__()
         if type(training_metric_interval) is not int or training_metric_interval < 1:
@@ -107,6 +110,9 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         if readout_mode not in {"legacy", "normalized_top_k"}:
             raise ValueError("readout_mode must be legacy or normalized_top_k")
         self.readout_mode = readout_mode
+        if regularization_scope not in {"unique_spaces", "per_level"}:
+            raise ValueError("regularization_scope must be unique_spaces or per_level")
+        self.regularization_scope = regularization_scope
         if regularizer_kind not in {"sigreg", "localereg"}:
             raise ValueError("regularizer_kind must be sigreg or localereg")
         for name, value, minimum in (
@@ -227,6 +233,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "prediction_weights": list(prediction_weights),
             "masked_weight": self.masked_weight,
             "regularization_weight": self.regularization_weight,
+            "regularization_scope": regularization_scope,
             "ema_decay": self.ema_decay,
             "eval_seed": eval_seed,
             "sigreg_projections": sigreg_projections,
@@ -345,7 +352,28 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     def forward(self, waveform: Tensor) -> list[Tensor]:
         return self.predict(waveform)
 
-    def compute_loss(self, waveform: Tensor, seed: int | None = None) -> dict[str, Any]:
+    def compute_loss(
+        self, waveform: Tensor, seed: int | None = None, *, diagnostics: bool = False
+    ) -> dict[str, Any]:
+        distributed_training = (
+            self.training
+            and torch.is_grad_enabled()
+            and dist.is_available()
+            and dist.is_initialized()
+        )
+        if distributed_training:
+            valid_shape = (
+                waveform.ndim == 2
+                and waveform.shape[0] > 0
+                and waveform.shape[1] == self.required_samples
+                and waveform.dtype == torch.float32
+            )
+            valid = torch.isfinite(waveform).all() & valid_shape
+            if not all_ranks_true(valid):
+                raise ValueError(
+                    "invalid waveform on at least one training rank; expected finite float32 "
+                    f"[batch, {self.required_samples}] samples"
+                )
         windows = self._windows(waveform, self.sample_windows)
         if seed is None and not self.training:
             seed = self.eval_seed
@@ -360,6 +388,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         terms, reg_terms = [zero] * 3, [zero] * 3
         levels, predictions, targets = [], [], []
         regularization_stats = []
+        teacher_origins = []
         if any(self.prediction_weights) or self.regularization_weight:
             # Encode ONLY the prefix for the online forecasting path. The separate
             # masked anchor may use all windows, but shares no contextual activations.
@@ -379,6 +408,19 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                     )
                     target_levels = self._levels(selected, self.teacher_abstractions)
                     targets = [values[:, i] for i, values in enumerate(target_levels)]
+                    if diagnostics:
+                        origin = self.context_windows - 1
+                        origin_low = (
+                            teacher_windows[:, origin : origin + 1]
+                            if teacher_windows is not None
+                            else self.backbone.encode_teacher_windows(
+                                windows[:, origin : origin + 1]
+                            )
+                        )
+                        teacher_origins = [
+                            values[:, 0]
+                            for values in self._levels(origin_low, self.teacher_abstractions)
+                        ]
                 terms = [
                     F.mse_loss(prediction.float(), target.float()) if weight > 0 else zero
                     for prediction, target, weight in zip(
@@ -401,6 +443,19 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                     reg_terms = []
                     distributed = dist.is_available() and dist.is_initialized()
                     for index, level in enumerate(levels):
+                        # Flat levels are slices of the same low state space.
+                        # Regularize its full context grid once, not overlapping
+                        # stride grids three times. Hierarchical levels remain
+                        # distinct distributions and each keeps its own penalty.
+                        # Legacy checkpoints explicitly retain per_level behavior.
+                        if (
+                            self.regularization_scope == "unique_spaces"
+                            and not self.config["hierarchy"]
+                            and index > 0
+                        ):
+                            reg_terms.append(zero)
+                            regularization_stats.append({})
+                            continue
                         # The same random statistic must be evaluated on every
                         # rank's differentiably gathered population. Accumulation
                         # does not enlarge that population. Single-device legacy
@@ -432,7 +487,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             + prediction_loss
             + self.regularization_weight * regularization_loss
         )
-        if not torch.isfinite(torch.stack([loss, masked, *terms, *reg_terms])).all():
+        if not all_ranks_true(
+            torch.isfinite(torch.stack([loss, masked, *terms, *reg_terms])).all(),
+            synchronize=distributed_training,
+        ):
             raise FloatingPointError("non-finite upstream WavJEPA dynamics loss")
         return {
             "loss": loss,
@@ -445,11 +503,39 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "levels": levels,
             "predictions": predictions,
             "targets": targets,
+            "teacher_origins": teacher_origins,
         }
+
+    @torch.no_grad()
+    def temporal_diagnostics(self, result: dict[str, Any]) -> list[dict[str, Tensor]]:
+        """Cheap held-out probes from already encoded states and EMA targets.
+
+        No extra backbone pass is needed when the default masked anchor is active.
+        Only small predictor heads see the cyclically shifted context. These
+        measurements reveal temporal collapse; they do not prevent or certify it.
+        """
+        levels = result["levels"]
+        stats = [recording_variance(level) for level in levels]
+        if not result["teacher_origins"]:
+            return stats
+        shifted_predictions = self._predict_levels([level.roll(1, dims=1) for level in levels])
+        for index, (prediction, target, origin, shifted, weight) in enumerate(
+            zip(
+                result["predictions"],
+                result["targets"],
+                result["teacher_origins"],
+                shifted_predictions,
+                self.prediction_weights,
+                strict=True,
+            )
+        ):
+            if weight > 0:
+                stats[index].update(forecast_diagnostics(prediction, target, origin, shifted))
+        return stats
 
     def _shared_step(self, batch: dict[str, Tensor], stage: str, batch_idx: int) -> Tensor:
         seed = None if stage == "train" else (self.eval_seed + batch_idx) % 2**32
-        result = self.compute_loss(batch["waveform"], seed=seed)
+        result = self.compute_loss(batch["waveform"], seed=seed, diagnostics=stage != "train")
         if (
             stage == "train"
             and self.global_step != self._initial_training_step
@@ -480,6 +566,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             self.log(
                 f"{stage}/level_{i}/batch_std", level.std(dim=0, unbiased=False).mean(), **kwargs
             )
+        if stage != "train":
+            for i, stats in enumerate(self.temporal_diagnostics(result)):
+                for name, value in stats.items():
+                    self.log(f"{stage}/level_{i}/{name}", value, **kwargs)
         return result["loss"]
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:

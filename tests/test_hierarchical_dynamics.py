@@ -347,11 +347,34 @@ def test_optimizer_updates_teacher_only_after_successful_step():
     model = model_factory()
     optimizer = model.configure_optimizers()
     model.compute_loss(waveform(), seed=37)["loss"].backward()
+    pairs = [
+        (model.backbone.model.encoder, model.backbone.model.teacher_encoder),
+        *zip(model.abstractions, model.teacher_abstractions, strict=True),
+    ]
+    snapshots = [
+        (student, teacher, student.detach().clone(), teacher.detach().clone())
+        for online, target in pairs
+        for student, teacher in zip(online.parameters(), target.parameters(), strict=True)
+    ]
     assert model.ema_updates.item() == 0
     model.on_before_optimizer_step(optimizer)
+    assert model.ema_updates.item() == 0
+    for _, teacher, _, previous_teacher in snapshots:
+        torch.testing.assert_close(teacher, previous_teacher, rtol=0, atol=0)
     optimizer.step()
     assert model.ema_updates.item() == 1
     assert optimizer.state
+    distinct_from_pre_step = False
+    for student, teacher, previous_student, previous_teacher in snapshots:
+        expected = model.ema_decay * previous_teacher + (1 - model.ema_decay) * student
+        incorrect_pre_step = (
+            model.ema_decay * previous_teacher + (1 - model.ema_decay) * previous_student
+        )
+        torch.testing.assert_close(teacher, expected)
+        distinct_from_pre_step |= bool((expected - incorrect_pre_step).abs().max() > 1e-6)
+    # Pin ordering with actual parameter values: counting one EMA update alone
+    # also passes an incorrect update performed before optimizer.step().
+    assert distinct_from_pre_step
 
 
 def test_checkpoint_round_trip_preserves_predictions_and_plain_metadata(tmp_path):

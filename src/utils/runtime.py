@@ -11,8 +11,21 @@ from functools import wraps
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from lightning_utilities.core.rank_zero import rank_zero_only
 from omegaconf import DictConfig, OmegaConf
+
+
+def all_ranks_true(flag: torch.Tensor, *, synchronize: bool = True) -> bool:
+    """Agree on a scalar validity flag before any rank takes a failure branch.
+
+    Call only at a boundary reached by every training rank. Evaluation and
+    arbitrary exceptions inside a rank's forward do not use this collective.
+    """
+    if synchronize and dist.is_available() and dist.is_initialized():
+        flag = flag.detach().to(dtype=torch.int32)
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag)
 
 
 def require_finite_gradients(optimizer: torch.optim.Optimizer) -> None:
@@ -30,9 +43,16 @@ def require_finite_gradients(optimizer: torch.optim.Optimizer) -> None:
             if gradient is not None:
                 values = gradient._values() if gradient.is_sparse else gradient
                 flags[gradient.device].append(torch.isfinite(values).all())
+    parameter = next((p for group in optimizer.param_groups for p in group["params"]), None)
+    if parameter is None:
+        return
+    # One scalar collective also covers a rank with no gradient tensors. Every
+    # rank then aborts before its optimizer/EMA hook, instead of stranding peers.
+    finite = torch.ones((), dtype=torch.bool, device=parameter.device)
     for device_flags in flags.values():
-        if not torch.stack(device_flags).all():
-            raise FloatingPointError("non-finite gradient; optimizer and EMA update aborted")
+        finite = finite & torch.stack(device_flags).all().to(parameter.device)
+    if not all_ranks_true(finite):
+        raise FloatingPointError("non-finite gradient; optimizer and EMA update aborted")
 
 
 def atomic_json(path: Path, value: dict) -> None:

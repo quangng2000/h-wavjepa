@@ -81,7 +81,9 @@ def test_ema_annealing_matches_official_linear_schedule_and_stops_at_end():
 
 
 def test_old_schema_one_checkpoints_keep_constant_schedules():
-    model = model_factory()
+    # Reconstruct the historical objective as well as the historical schedule.
+    # New training defaults deliberately reject a silent regularizer-scope change.
+    model = model_factory(regularization_scope="per_level")
     checkpoint = checkpoint_for(model)
     for key in model.OPTIONAL_CONFIG_DEFAULTS:
         checkpoint[model.CHECKPOINT_KEY]["dynamics"].pop(key)

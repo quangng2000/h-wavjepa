@@ -58,7 +58,7 @@ def main():
         cfg.trainer.devices = 2
         cfg.trainer.accelerator = accelerator
         cfg.trainer.deterministic = accelerator == "cpu"
-        cfg.trainer.strategy = "ddp_find_unused_parameters_true"
+        cfg.trainer.strategy = "ddp_find_unused_parameters_false"
         cfg.trainer.use_distributed_sampler = False
         cfg.trainer.precision = precision
         cfg.trainer.accumulate_grad_batches = 2

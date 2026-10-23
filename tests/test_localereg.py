@@ -1,4 +1,4 @@
-"""Numerical checks for the pinned LocaLeReg code and its audio adaptation."""
+"""LocaLeReg adapter plumbing, source integrity and independent analytic checks."""
 
 import hashlib
 import json
@@ -27,7 +27,10 @@ def test_vendored_loss_is_byte_exact_at_the_pinned_revision():
     assert metadata["git_blob_sha1"] == "d0fd0b71c6362278da80bbc926421cab4fa972b7"
 
 
-def test_timewise_adapter_matches_official_values_and_gradients():
+def test_timewise_adapter_plumbing_preserves_upstream_values_and_gradients():
+    # Both sides deliberately use the same pinned loss implementation. This
+    # checks time-axis handling, arguments, reduction, RNG and gradient routing;
+    # it is not an independent implementation of the LocaLeReg objective.
     torch.manual_seed(37)
     states = torch.randn(3, 32, 16, requires_grad=True)
     reference = states.detach().clone().requires_grad_()

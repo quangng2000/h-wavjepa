@@ -57,6 +57,9 @@ predictor_heads: 4
 prediction_weights: [1.0, 1.0, 1.0]
 masked_weight: 1.0
 regularization_weight: 0.1
+# One penalty per distinct state space: three with hierarchy, low only when flat.
+# Missing fields in older checkpoints preserve their per_level objective.
+regularization_scope: unique_spaces
 # LocaLeJEPA local uniform-ball matching, adapted independently per audio time step.
 # Switch to sigreg for the previous Gaussian control; checkpoints enforce this choice.
 regularizer_kind: localereg
