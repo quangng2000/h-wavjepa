@@ -208,6 +208,11 @@ scalar loss and observed interval update rate. Upload phases report bytes and
 elapsed time. A separate publication record appears
 only after a checkpoint has passed complete remote verification.
 
+Known temporary network or service failures allow one retry within the same
+publication deadline. Before retransmission, the publisher checks whether an
+ambiguous completion already created the object and verifies all of its bytes.
+Checksum, ownership, permission and permanent API errors still fail immediately.
+
 Production shard reads share a 300-second total deadline across at most three
 requests. Interrupted bodies resume the remaining byte range, requiring exact
 range/length headers and a final whole-object SHA256 match. Worker batches have

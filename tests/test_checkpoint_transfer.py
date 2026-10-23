@@ -11,10 +11,12 @@ from urllib.parse import parse_qs, urlsplit
 import boto3
 import pytest
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from scripts.checkpoint_transfer import (
     ManagedCheckpointStore,
+    _CheckpointDeadlineExceeded,
+    _retryable_transfer_error,
     _UploadProgress,
     safe_exception_details,
 )
@@ -31,8 +33,11 @@ def gateway():
         "aborted": 0,
         "readbacks": 0,
         "fail_parts": False,
+        "fail_first_upload": False,
         "fail_complete": False,
+        "lose_completion_ack": False,
         "corrupt_readback": False,
+        "truncate_first_readback": False,
     }
     lock = threading.Lock()
 
@@ -71,6 +76,10 @@ def gateway():
                 self.respond(404)
             else:
                 state["readbacks"] += 1
+                if state["truncate_first_readback"] and state["readbacks"] == 1:
+                    self.close_connection = True
+                    self.respond(200, payload[:65536], size=len(payload))
+                    return
                 if state["corrupt_readback"]:
                     payload = b"x" + payload[1:]
                 self.respond(200, payload)
@@ -103,6 +112,9 @@ def gateway():
                 state["objects"][key] = b"".join(state["parts"][n] for n in numbers)
                 state["completed"] += 1
                 state["parts"].clear()
+                if state["lose_completion_ack"]:
+                    self.respond(503, b"<Error><Code>ServiceUnavailable</Code></Error>")
+                    return
                 self.respond(
                     200,
                     b'<CompleteMultipartUploadResult><ETag>"verified-object"</ETag>'
@@ -119,7 +131,7 @@ def gateway():
                 return
             if "partNumber" in query:
                 number = int(query["partNumber"][0])
-                if state["fail_parts"]:
+                if state["fail_parts"] or (state["fail_first_upload"] and state["created"] == 1):
                     self.respond(500, b"<Error><Code>InternalError</Code></Error>")
                     return
                 with lock:
@@ -248,7 +260,7 @@ def test_sdk_part_failure_aborts_and_exposes_only_safe_error(gateway, checkpoint
     with pytest.raises(RuntimeError) as failure:
         store.put_file("step.ckpt", path, digest)
     assert str(failure.value) == "Managed checkpoint upload failed (S3UploadFailedError)"
-    assert state["created"] == state["aborted"] == 1
+    assert state["created"] == state["aborted"] == 2
     assert state["completed"] == 0
     assert not state["objects"]
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
@@ -260,6 +272,7 @@ def test_sdk_part_failure_aborts_and_exposes_only_safe_error(gateway, checkpoint
     assert event["http_status"] == 500
     assert event["exception_chain"] == ["RuntimeError", "S3UploadFailedError", "ClientError"]
     assert event["operation_trace"][-1] == "AbortMultipartUpload"
+    assert event["attempt"] == 2 and event["will_retry"] is False
 
 
 def test_completion_failure_diagnostics_preserve_operation_after_abort(gateway, checkpoint, capsys):
@@ -281,6 +294,107 @@ def test_completion_failure_diagnostics_preserve_operation_after_abort(gateway, 
     assert event["bytes"] == path.stat().st_size
     for private in ("https://", "private.example", "secret-key", "token=secret", "step.ckpt"):
         assert private not in output
+
+
+def test_transient_part_failure_retries_once_and_verifies_complete_object(
+    gateway, checkpoint, capsys
+):
+    client, state = gateway
+    path, digest = checkpoint
+    state["fail_first_upload"] = True
+    receipt = ManagedCheckpointStore(client, "checkpoint-fixture", lambda: None).put_file(
+        "step.ckpt", path, digest
+    )
+    assert state["created"] == 2
+    assert state["aborted"] == state["completed"] == state["readbacks"] == 1
+    assert receipt["sha256"] == digest
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    failures = [event for event in events if event["event"] == "checkpoint_transfer_failed"]
+    assert len(failures) == 1 and failures[0]["will_retry"] is True
+    assert events[-1]["attempt"] == 2 and events[-1]["phase"] == "completed"
+
+
+@pytest.mark.parametrize("corrupt_readback", [False, True])
+def test_lost_completion_ack_reconciles_only_after_full_sha_readback(
+    gateway, checkpoint, corrupt_readback
+):
+    client, state = gateway
+    path, digest = checkpoint
+    state.update(lose_completion_ack=True, corrupt_readback=corrupt_readback)
+    store = ManagedCheckpointStore(client, "checkpoint-fixture", lambda: None)
+    if corrupt_readback:
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            store.put_file("step.ckpt", path, digest)
+    else:
+        assert store.put_file("step.ckpt", path, digest)["sha256"] == digest
+    # No second multipart upload: the first object exists despite a lost reply.
+    assert state["created"] == state["completed"] == state["readbacks"] == 1
+    assert state["aborted"] == 1
+
+
+def test_whole_transfer_retry_does_not_reset_caller_deadline(gateway, checkpoint):
+    client, state = gateway
+    path, digest = checkpoint
+    state["fail_first_upload"] = True
+
+    def check():
+        if state["aborted"]:
+            raise TimeoutError("original publication budget is exhausted")
+
+    with pytest.raises(_CheckpointDeadlineExceeded):
+        ManagedCheckpointStore(client, "checkpoint-fixture", check).put_file(
+            "step.ckpt", path, digest
+        )
+    assert state["created"] == state["aborted"] == 1
+    assert state["completed"] == state["readbacks"] == 0
+
+
+def test_interrupted_readback_restarts_full_verification_without_reupload(gateway, checkpoint):
+    client, state = gateway
+    path, digest = checkpoint
+    state["truncate_first_readback"] = True
+    receipt = ManagedCheckpointStore(client, "checkpoint-fixture", lambda: None).put_file(
+        "step.ckpt", path, digest
+    )
+    assert receipt["sha256"] == digest
+    assert state["created"] == state["completed"] == 1
+    assert state["readbacks"] == 2
+
+
+def test_socket_timeout_chain_is_distinct_from_total_publication_deadline():
+    network_error = ReadTimeoutError(endpoint_url="https://private.example")
+    network_error.__context__ = TimeoutError("socket read timed out")
+    wrapped = RuntimeError("SDK wrapper")
+    wrapped.__context__ = network_error
+    assert _retryable_transfer_error(wrapped)
+    network_error.__context__ = _CheckpointDeadlineExceeded("total budget expired")
+    assert not _retryable_transfer_error(wrapped)
+    assert not _retryable_transfer_error(TimeoutError("unclassified failure"))
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "retryable"),
+    [
+        ("SlowDown", 503, True),
+        ("TooManyRequestsException", 429, True),
+        ("RequestTimeout", 408, True),
+        ("InternalError", 500, True),
+        ("AccessDenied", 403, False),
+        ("InvalidPart", 400, False),
+        ("BadDigest", 503, False),
+        ("NotImplemented", 501, False),
+        ("Unknown", 505, False),
+        ("Unknown", 400, False),
+    ],
+)
+def test_only_transient_structured_sdk_errors_are_retried(code, status, retryable):
+    error = ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "UploadPart",
+    )
+    assert _retryable_transfer_error(error) is retryable
+    error.__context__ = ValueError("integrity failure")
+    assert not _retryable_transfer_error(error)
 
 
 def test_safe_exception_details_traverse_cause_and_context_without_messages():

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "test": "full_checkpoint_size_s3_transfer",
+  "completed_at_utc": "2026-10-23T16:43:20Z",
+  "hardware": "cpu-2",
+  "source_commit": "3c2cb7e1123eec448acb1655eb0ad5374bf344c6",
+  "overlay": "sanitized transfer diagnostics later committed in dd34d65",
+  "input": "synthetic zero-filled file, not model training state",
+  "bytes": 2262396105,
+  "sha256": "64409ef94c0e51dd7c2d59de5a4b977233a1ee8dec895fdc6093f10cf9ec748c",
+  "multipart_part_bytes": 8388608,
+  "multipart_concurrency": 8,
+  "upload_seconds": 43.042,
+  "upload_and_complete_sha256_readback_seconds": 69.194,
+  "complete_remote_readback_verified": true,
+  "scratch_object_removed": true,
+  "training_checkpoint_verified": false,
+  "four_gpu_training_acceptance": false,
+  "limitation": "This establishes full-size transport compatibility in isolation. It does not identify the preceding GPU attempt's upload error or prove reliability during concurrent audio streaming."
+}

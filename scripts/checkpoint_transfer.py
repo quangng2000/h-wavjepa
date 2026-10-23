@@ -14,11 +14,53 @@ import time
 from pathlib import Path
 
 from boto3.s3.transfer import TransferConfig
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    IncompleteReadError,
+    ReadTimeoutError,
+    ResponseStreamingError,
+)
 
 from src.stage_audioset import MAX_OBJECT_BYTES, StageLimit, Store
 
 CHECKPOINT_TRANSFER_CONCURRENCY = 8
 CHECKPOINT_PART_BYTES = 8 * 1024**2
+_TRANSIENT_CODES = frozenset(
+    {
+        "InternalError",
+        "InternalFailure",
+        "RequestTimeout",
+        "RequestTimeoutException",
+        "ServiceUnavailable",
+        "SlowDown",
+        "Throttling",
+        "ThrottlingException",
+        "TooManyRequestsException",
+    }
+)
+_PERMANENT_CODES = frozenset(
+    {
+        "AccessDenied",
+        "AccessDeniedException",
+        "AuthorizationHeaderMalformed",
+        "BadDigest",
+        "EntityTooSmall",
+        "ExpiredToken",
+        "InvalidAccessKeyId",
+        "InvalidDigest",
+        "InvalidPart",
+        "InvalidPartOrder",
+        "InvalidRequest",
+        "InvalidToken",
+        "NoSuchBucket",
+        "NoSuchUpload",
+        "NotImplemented",
+        "SignatureDoesNotMatch",
+    }
+)
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 _S3_OPERATIONS = frozenset(
     {
@@ -33,14 +75,62 @@ _S3_OPERATIONS = frozenset(
 )
 
 
-def safe_exception_details(error):
-    """Read only structured fields; SDK wrapper messages can contain secrets."""
-    pending, seen, chain, sdk_errors = [error], set(), [], []
-    while pending and len(chain) < 16:
+class _CheckpointDeadlineExceeded(TimeoutError):
+    """Distinguish the caller's total deadline from an SDK socket timeout."""
+
+
+def _exception_chain(error):
+    pending, seen = [error], set()
+    while pending and len(seen) < 16:
         current = pending.pop(0)
         if id(current) in seen:
             continue
         seen.add(id(current))
+        yield current
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+
+
+def _retryable_transfer_error(error):
+    """Retry only recognized transient failures, never integrity/deadline errors."""
+    chain = list(_exception_chain(error))
+    if any(
+        isinstance(
+            item, (_CheckpointDeadlineExceeded, ValueError, TypeError, KeyError, AssertionError)
+        )
+        for item in chain
+    ):
+        return False
+    retryable = False
+    for item in chain:
+        if isinstance(item, ClientError):
+            code = item.response.get("Error", {}).get("Code")
+            status = item.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if code in _PERMANENT_CODES or status in {401, 403, 501, 505}:
+                return False
+            retryable |= code in _TRANSIENT_CODES or (
+                type(status) is int and (status in {408, 429} or 500 <= status <= 599)
+            )
+        elif isinstance(
+            item,
+            (
+                ConnectTimeoutError,
+                ReadTimeoutError,
+                EndpointConnectionError,
+                ConnectionClosedError,
+                IncompleteReadError,
+                ResponseStreamingError,
+            ),
+        ):
+            retryable = True
+    return retryable
+
+
+def safe_exception_details(error):
+    """Read only structured fields; SDK wrapper messages can contain secrets."""
+    chain, sdk_errors = [], []
+    for current in _exception_chain(error):
         name = type(current).__name__
         chain.append(name if _SAFE_TOKEN.fullmatch(name) else "UnknownException")
         operation = getattr(current, "operation_name", None)
@@ -59,11 +149,6 @@ def safe_exception_details(error):
                 detail["http_status"] = status
             if detail:
                 sdk_errors.append(detail)
-        # S3Transfer wraps ClientError in S3UploadFailedError using implicit
-        # context. A caller may also explicitly chain a different exception.
-        for linked in (current.__cause__, current.__context__):
-            if isinstance(linked, BaseException):
-                pending.append(linked)
     return {"exception_chain": chain, "sdk_errors": sdk_errors}
 
 
@@ -98,23 +183,28 @@ class _TransferDiagnostics:
         if self.events is not None:
             self.events.unregister("before-call.s3.*", unique_id=self.identifier)
         if error is not None:
-            with self.progress.lock, self.lock:
-                details = safe_exception_details(error)
-                event = {
-                    "event": "checkpoint_transfer_failed",
-                    "transfer_stage": self.progress.current_phase,
-                    "bytes": self.progress.bytes,
-                    "total_bytes": self.progress.total_bytes,
-                    "last_transfer_operation": self.last_transfer_operation,
-                    "operation_trace": list(self.operations),
-                    **details,
-                }
-                # Also expose the first structured SDK error at the top level
-                # for compact logs, preserving all errors in the bounded list.
-                if details["sdk_errors"]:
-                    event.update(details["sdk_errors"][0])
-                print(json.dumps(event, allow_nan=False), flush=True)
+            self.report_failure(error)
         return False
+
+    def report_failure(self, error, *, will_retry=False):
+        with self.progress.lock, self.lock:
+            details = safe_exception_details(error)
+            event = {
+                "event": "checkpoint_transfer_failed",
+                "transfer_stage": self.progress.current_phase,
+                "attempt": self.progress.attempt,
+                "will_retry": will_retry,
+                "bytes": self.progress.bytes,
+                "total_bytes": self.progress.total_bytes,
+                "last_transfer_operation": self.last_transfer_operation,
+                "operation_trace": list(self.operations),
+                **details,
+            }
+            # Also expose the first structured SDK error at the top level
+            # for compact logs, preserving all errors in the bounded list.
+            if details["sdk_errors"]:
+                event.update(details["sdk_errors"][0])
+            print(json.dumps(event, allow_nan=False), flush=True)
 
 
 class _UploadProgress:
@@ -126,6 +216,7 @@ class _UploadProgress:
         self.bytes = 0
         self.started = self.last_report = time.monotonic()
         self.current_phase = "started"
+        self.attempt = 1
         self.lock = threading.Lock()
 
     def _report(self, phase, now):
@@ -135,6 +226,7 @@ class _UploadProgress:
                 {
                     "event": "checkpoint_transfer",
                     "phase": phase,
+                    "attempt": self.attempt,
                     "bytes": self.bytes,
                     "total_bytes": self.total_bytes,
                     "elapsed_seconds": round(elapsed, 3),
@@ -167,40 +259,69 @@ class _UploadProgress:
 class ManagedCheckpointStore(Store):
     """Upload local checkpoints using the SDK, then verify the complete object."""
 
+    def __init__(self, client, bucket, check):
+        def check_deadline():
+            try:
+                check()
+            except TimeoutError as error:
+                raise _CheckpointDeadlineExceeded(
+                    "Checkpoint publication exceeded its reserved time"
+                ) from error
+
+        super().__init__(client, bucket, check_deadline)
+
     def put_file(self, key, path: Path, digest):
         size = path.stat().st_size
         if size > MAX_OBJECT_BYTES:
             raise StageLimit("Checkpoint exceeds the supported 4 GiB object limit")
         progress = _UploadProgress(size, self.check)
-        with _TransferDiagnostics(self.client, progress):
+        with _TransferDiagnostics(self.client, progress) as diagnostics:
             progress.phase("started")
-            if self.head(key) is None:
-                progress.phase("upload")
-                config = TransferConfig(
-                    multipart_threshold=CHECKPOINT_PART_BYTES,
-                    multipart_chunksize=CHECKPOINT_PART_BYTES,
-                    max_concurrency=CHECKPOINT_TRANSFER_CONCURRENCY,
-                    use_threads=True,
-                    preferred_transfer_client="classic",
-                )
+            for attempt in (1, 2):
+                progress.attempt = attempt
                 try:
-                    self.client.upload_file(
-                        Filename=str(path),
-                        Bucket=self.bucket,
-                        Key=key,
-                        Config=config,
-                        Callback=progress,
-                    )
-                except TimeoutError:
-                    raise TimeoutError("Checkpoint upload exceeded its reserved time") from None
+                    if attempt > 1:
+                        # The SDK has already joined its workers and attempted
+                        # abort cleanup. Completion may nevertheless have landed:
+                        # HEAD first, then prove the entire object before reuse.
+                        progress.phase("reconcile")
+                    if self.head(key) is None:
+                        progress.bytes = 0
+                        progress.phase("upload")
+                        self._upload_file(key, path, progress)
+                    progress.phase("verify")
+                    receipt = self.verify(key, digest, size)
+                    progress.bytes = size
+                    progress.phase("completed")
+                    return receipt
                 except Exception as error:
-                    # SDK messages can carry endpoints, signed URLs or local paths.
-                    raise RuntimeError(
-                        f"Managed checkpoint upload failed ({type(error).__name__})"
-                    ) from None
-            # Content-addressed existing objects are verified, never overwritten.
-            progress.phase("verify")
-            receipt = self.verify(key, digest, size)
-            progress.bytes = size
-            progress.phase("completed")
-            return receipt
+                    # The original caller's deadline covers both attempts and
+                    # readbacks; no retry creates a fresh time allowance.
+                    self.check()
+                    if attempt == 2 or not _retryable_transfer_error(error):
+                        raise
+                    diagnostics.report_failure(error, will_retry=True)
+
+    def _upload_file(self, key, path, progress):
+        config = TransferConfig(
+            multipart_threshold=CHECKPOINT_PART_BYTES,
+            multipart_chunksize=CHECKPOINT_PART_BYTES,
+            max_concurrency=CHECKPOINT_TRANSFER_CONCURRENCY,
+            use_threads=True,
+            preferred_transfer_client="classic",
+        )
+        try:
+            self.client.upload_file(
+                Filename=str(path),
+                Bucket=self.bucket,
+                Key=key,
+                Config=config,
+                Callback=progress,
+            )
+        except TimeoutError:
+            raise TimeoutError("Checkpoint upload exceeded its reserved time") from None
+        except Exception as error:
+            # SDK messages can carry endpoints, signed URLs or local paths.
+            raise RuntimeError(
+                f"Managed checkpoint upload failed ({type(error).__name__})"
+            ) from None
