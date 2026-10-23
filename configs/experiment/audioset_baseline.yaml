@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - audioset
+  - _self_
+
+# Matched nine-window AudioSet control, not the published WavJEPA crop recipe.
+tags: [audioset, masked-only-control, random-initialization, research]
+model:
+  hierarchy: false
+  prediction_weights: [0.0, 0.0, 0.0]
+  regularization_weight: 0.0

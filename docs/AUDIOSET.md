@@ -44,10 +44,22 @@ sampling, optimizer batch, audio exposure, or compute. Record the available
 AudioSet subset and manifest hashes: missing source clips can change the cohort.
 No elapsed training time is inferred from that paper.
 
-The weight decay of **0.04** is a project adaptation; the vendored WavJEPA
-constructor defaults to **0.01**. It is not a claim about the paper's resolved
-training configuration. Keep the value matched across comparison arms and record
-any `model.optimizer.weight_decay` override.
+The weight decay of **0.04** matches WavJEPA's reported setting in Section 3.2
+and Appendix A; the vendored constructor's fallback default is **0.01**. Keep the
+resolved value matched across comparison arms and record any
+`model.optimizer.weight_decay` override.
+
+Use `audioset_baseline` for the **masked-only control with this same nine-window
+recipe**. The `audioset_baseline_h100`, `audioset_baseline_h100_fast`, and
+`audioset_baseline_h100_four` variants inherit their respective execution presets.
+They disable the future heads, upper maps and distribution penalties, while
+retaining the data recipe, masked objective, initialization, optimizer and schedule.
+For the four-H100 flat forecasting arm, use
+`experiment=audioset_h100_four model.hierarchy=false`. Apply identical data and
+initialization overrides to every arm and report compute separately from updates.
+These controls support comparisons within the adaptation; they are not a
+reproduction of WavJEPA's original crop recipe. See [comparison scope and further
+ablations](UPSTREAM_DYNAMICS.md#what-the-comparisons-test).
 
 `audioset` inherits the CPU, deterministic FP32 trainer so configuration/debugging
 does not implicitly select GPUs. `trainer=gpu` selects one GPU and keeps those

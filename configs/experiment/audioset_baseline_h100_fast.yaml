@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - audioset_h100_fast
+  - _self_
+
+# Keep the same compact masking and diagnostic cadence as the fast comparator.
+tags: [audioset, masked-only-control, two-h100, research]
+model:
+  hierarchy: false
+  prediction_weights: [0.0, 0.0, 0.0]
+  regularization_weight: 0.0

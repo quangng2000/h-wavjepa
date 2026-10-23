@@ -1,4 +1,6 @@
-"""SIGReg from H-JEPA, MIT licensed; see third_party/licenses/H-JEPA.txt.
+"""LeJEPA's SIGReg, using H-JEPA code under MIT; see third_party/licenses/H-JEPA.txt.
+
+Method: Balestriero and LeCun, LeJEPA, https://arxiv.org/abs/2511.08544.
 
 Source: kevinghst/H-JEPA, commit 97054ecaff83e13839195ec4b92d74c08a0127c5,
 h_jepa/loss.py, SIGReg. The single-device mathematical implementation is

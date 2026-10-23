@@ -10,6 +10,12 @@ This may satisfy the cross-recording distribution penalty and make forecasting
 easy without learning within-recording dynamics. Neither low prediction loss nor
 a nonzero batch standard deviation rules this out.
 
+Action inputs would not automatically remove this solution: a predictor can
+ignore them. H-JEPA addresses slow-feature collapse on diverse scenes with an
+additional inverse-dynamics loss ([Section 4.3](https://arxiv.org/html/2610.06805v1#S4.SS3)).
+This action-free audio adaptation has no equivalent supervision. Its EMA targets
+and marginal regularizer are not a guarantee against the recording-identity shortcut.
+
 Validation and test now log these measurements for every level:
 
 | Metric suffix | Meaning |

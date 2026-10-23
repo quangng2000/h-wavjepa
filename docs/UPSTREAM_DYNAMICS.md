@@ -1,4 +1,4 @@
-# Hierarchical dynamics on official WavJEPA
+# Learned horizon-specific target spaces on official WavJEPA
 
 This route extends the actual [WavJEPA training core](https://github.com/labhamlet/wavjepa)
 at commit `6f4e1b1f18316c50768c8523f325ccffeaa6985b`. It does not rebuild its
@@ -12,7 +12,8 @@ The source subset, hashes, compatibility edits and licenses are recorded in
 | --- | --- | --- |
 | Waveform features, masked context/target prediction, EMA context encoder | [WavJEPA, Section 3.1](https://arxiv.org/html/2509.23238v1#S3.SS1), [pinned training source](https://github.com/labhamlet/wavjepa/tree/6f4e1b1f18316c50768c8523f325ccffeaa6985b) | Reuses the official core and masked loss. |
 | Compositional latent spaces at coarser temporal strides | [H-JEPA, Section 2.1, Eq. 1](https://arxiv.org/html/2610.06805v1#S2.SS1), [pinned three-level AntMaze configuration](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/config/train/ant_hjepa_l3.yaml) | Pointwise upper MLPs with state window size 1; default relative strides 2 then 2. |
-| Per-space future prediction and SIGReg | [H-JEPA, Section 2.1, Eqs. 2–3](https://arxiv.org/html/2610.06805v1#S2.SS1), [pinned loss implementation](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/loss.py) | Separate audio predictors; SIGReg remains available as a control. |
+| Per-space future prediction | [H-JEPA, Section 2.1, Eq. 2](https://arxiv.org/html/2610.06805v1#S2.SS1) | Separate action-free audio predictors. |
+| Sketched Isotropic Gaussian Regularization (SIGReg) | Method: [Balestriero and LeCun, LeJEPA](https://arxiv.org/abs/2511.08544). Code: [pinned H-JEPA loss implementation](https://github.com/kevinghst/H-JEPA/blob/97054ecaff83e13839195ec4b92d74c08a0127c5/h_jepa/loss.py) | Available as a regularizer control; method attribution and code provenance are distinct. |
 | Local, centered uniform-ball distribution matching | [LocaLeJEPA, Section 4](https://arxiv.org/abs/2610.28458), [pinned loss implementation](https://github.com/alessioborgi/LocaLeJEPA/blob/771361c18d37e65df3dc188761ffb26751ce4e37/src/losses.py) | LocaLeReg is the default; clusters are formed across recordings separately at each time and level. See [audio adaptations](LOCALEREG.md). |
 
 H-JEPA's experiments use **state window size 1**. The general formulation allows
@@ -41,6 +42,13 @@ tokens *inside one audio window*; it is separate from the pointwise hierarchy
 targets makes this a hybrid of the two references, not a reproduction of either
 paper's complete training experiment.
 
+Action conditioning alone does not exclude an episode-constant state: a predictor
+can ignore actions. H-JEPA explicitly studies this failure on diverse scenes and
+adds **inverse-dynamics supervision**, predicting actions from consecutive states
+([Section 4.3 and Appendices K–L](https://arxiv.org/html/2610.06805v1#S4.SS3)).
+AudioSet has no corresponding action labels here. Cross-recording distribution
+matching and EMA do not establish that our states retain within-recording dynamics.
+
 ## What changes
 
 The original masked objective remains active. Two small pointwise MLPs create
@@ -49,10 +57,11 @@ PyTorch Transformer forecasting head; upper-level losses update both MLPs and
 the shared encoder. A `hierarchy=false` control replaces the MLPs with identity
 maps while keeping the same predictor architecture, horizons, and temporal strides.
 
-For completed window index `t`, the student and teacher independently apply
-the same WavJEPA readout transformation: instance-normalize each of their last
-eight Transformer layers, average those layers, and mean-pool the resulting
-tokens. Medium states are `G2(low)` and high states are `G3(medium)`. This fixes
+For completed window index `t`, the student and teacher independently use
+WavJEPA's masked-target layer selection and normalization: normalize each of their
+last eight Transformer layers and average those layers. We then **add a temporal
+mean over tokens** to form a window state. This pooling is our readout adaptation.
+Medium states are `G2(low)` and high states are `G3(medium)`. This fixes
 the earlier mismatch between final-layer student means and normalized top-layer
 teacher means. Both EMA upper maps now receive the same kind of inputs as their
 online counterparts, while the original masked predictor retains its own
@@ -64,6 +73,14 @@ resume is rejected. Mean pooling can discard within-window details and is not
 evidence of learned semantic abstraction. The original masked objective still
 trains finer token-level features. Temporal aggregation over multiple completed
 windows remains a separate experiment; the pointwise baseline is preserved.
+
+The pinned core applies four-dimensional `instance_norm` to `[layers, batch,
+features, tokens]`, normalizing jointly over features and tokens for each layer
+and recording. A temporal mean is therefore not forced to zero. Nevertheless,
+mean pooling loses explicit token order and can discard brief events. Dominance
+by background or channel identity is a hypothesis to test, not an observed result.
+The 10 ms frontend stride is a sampling grid: Transformer tokens already see the
+complete window, so they are not restricted to 10 ms of audio context.
 
 The default history contains five consecutive windows. Every predictor's origin
 is window 4 (zero-based), and the target indices are 5, 6, and 8:
@@ -81,9 +98,10 @@ interval up to it. All levels have the same width but distinct learned coordinat
 
 The loss is original masked MSE plus weighted own-space future MSE plus
 regularization in each space. The default is LocaLeReg from LocaLeJEPA;
-`model.regularizer_kind=sigreg` retains SIGReg from H-JEPA commit
-`97054ecaff83e13839195ec4b92d74c08a0127c5`. Both are attributed under MIT and
-evaluated across recordings separately at each observed timestep. Time steps
+`model.regularizer_kind=sigreg` retains LeJEPA's SIGReg, using code from H-JEPA
+commit `97054ecaff83e13839195ec4b92d74c08a0127c5`. Both code sources retain their
+MIT notices. Both penalties are evaluated across recordings separately at each
+observed timestep. Time steps
 are not flattened into independent examples. Coefficients and projection counts
 are configurable. Positive collapse penalties do not prove useful semantics,
 successful optimization, or superiority over a flat model. The [LocaLeReg
@@ -98,6 +116,55 @@ nine teacher windows; its detached token targets are reused for forecasting,
 removing the previous duplicate nine-window teacher pass. The online forecasting
 prefix remains separate from the masked online branch. EMA updates only after
 successful optimizer steps. This is **not** H-JEPA's no-EMA, action-conditioned training recipe.
+
+## What the comparisons test
+
+The implemented pointwise experiment asks whether learned target coordinates for
+different horizons help WavJEPA under a fixed audio recipe. Every upper state is a
+deterministic function of one low state; it has no additional observed temporal
+support. H-JEPA also evaluates pointwise upper encoders, so pointwise structure is
+not itself a departure from its architecture. It does not establish useful
+abstraction in this audio adaptation.
+
+A sufficiently expressive predictor on low states could compose these MLPs, but
+that is not an exact equivalence theorem for the fixed-size Transformers here.
+Changing target coordinates also changes the MSE geometry, gradient paths, and
+regularization. The flat comparison tests that combined intervention; compare
+frozen downstream representations rather than ranking unrelated latent MSEs.
+
+| Comparison | What it can establish |
+| --- | --- |
+| AudioSet masked-only versus flat multi-horizon | Effect of forecasting plus low-space regularization under the same nine-window recipe |
+| Flat versus learned pointwise upper maps | Effect of learned target spaces together with their upper-space penalties |
+| Released WavJEPA weights versus a newly trained model | A reference score, with initialization, data recipe and training budget confounds |
+
+`audioset_baseline` and its `_h100`, `_h100_fast`, and `_h100_four` variants retain
+the matching AudioSet data, masking, optimizer, schedule, initialization and
+execution settings, while disabling forecasting and distribution penalties.
+Use the same initialization override and data index for both arms. Equal update
+and example budgets do not imply equal FLOPs; report measured compute separately.
+For the flat four-H100 arm, use `experiment=audioset_h100_four model.hierarchy=false`.
+
+Further mechanism claims need **new, separately configured experiments**:
+
+- Match flat predictor capacity/compute, and compare independent horizon maps
+  with the composed G2/G3 maps, to distinguish added capacity from composition.
+- Compare temporal-mean readout with a readout that retains within-window temporal
+  structure, matching student and target definitions. Evaluate event timing as
+  well as scene tasks, and retain the mean-pool control.
+- Compare pointwise maps with encoders over multiple consecutive low states.
+  Define past-only support and target alignment explicitly; match the flat
+  predictor's available context. Aggregation alone does not exclude recording identity.
+- Ablate upper-target EMA and regularization separately while retaining WavJEPA's
+  masked teacher. An online target policy must specify whether targets are detached;
+  setting EMA decay to zero is not equivalent to a fully differentiable no-teacher
+  objective. The current constructor requires positive regularization for learned
+  upper targets, so a zero-penalty cell needs an explicit experimental implementation.
+
+These readout, aggregation and upper-target-policy ablations are not implemented
+presets or validated fixes. [Temporal diagnostics](TEMPORAL_DIAGNOSTICS.md) can
+detect suspicious solutions, but cannot replace downstream evaluation or prevent
+collapse. Hardware smoke tests establish execution, not these research claims.
 
 ## Chronology and causality
 

@@ -4,9 +4,9 @@
 [![Lightning](https://img.shields.io/badge/Lightning-792EE5?logo=lightning&logoColor=white)](https://lightning.ai/docs/pytorch/stable/)
 [![Hydra](https://img.shields.io/badge/config-Hydra-89b8cd)](https://hydra.cc/)
 
-Three latent audio spaces built on the official [WavJEPA](https://github.com/labhamlet/wavjepa) training core, using [H-JEPA](https://github.com/kevinghst/H-JEPA)'s pointwise hierarchy and [LocaLeReg](docs/LOCALEREG.md). Experiments follow the [Lightning–Hydra template](docs/TEMPLATE.md).
+A research baseline for **learned horizon-specific target spaces** on top of the official [WavJEPA](https://github.com/labhamlet/wavjepa) training core. It uses pointwise upper maps inspired by [H-JEPA](https://github.com/kevinghst/H-JEPA) and [LocaLeReg](docs/LOCALEREG.md). Experiments follow the [Lightning–Hydra template](docs/TEMPLATE.md).
 
-The model retains masked prediction and adds three future predictors. Upper states transform individual windows; they **do not aggregate longer audio intervals**. This is a research baseline with no demonstrated benchmark improvement yet.
+The model retains masked prediction and adds three future predictors. Upper states transform individual windows; they **do not aggregate longer audio intervals**. Learned temporal abstraction and downstream improvement have not been demonstrated. See the [research boundaries and planned ablations](docs/UPSTREAM_DYNAMICS.md#what-the-comparisons-test).
 
 ![Three-space H-WavJEPA concept](docs/figures/h-wavjepa-three-latent-spaces.png)
 
@@ -62,12 +62,16 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 | `audioset_h100_fast` / `audioset_h100_four` | Measured compact-token presets on two/four H100s, keeping global batch 64 |
 | `audioset_pretrained` | AudioSet hierarchy initialized from released WavJEPA weights |
 | `audioset_flat` | Matched horizons and strides, upper maps replaced by identities |
+| `audioset_baseline` | Masked-only control under the same nine-window AudioSet recipe |
+| `audioset_baseline_h100` / `audioset_baseline_h100_fast` / `audioset_baseline_h100_four` | Masked-only controls matching the two/four-H100 execution presets |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |
 | `upstream_sigreg` / `upstream_baseline` | SIGReg and masked-objective controls on long recordings |
 
-For pretrained two-GPU training, add `model.backbone.pretrained=true` to `audioset_h100`. This explicitly downloads pinned, checksum-verified weights (~785 MB); only fixed sinusoidal positions are regenerated for the shorter window. Learned tensors load strictly. Use `model.regularizer_kind=sigreg` for a matched regularizer control.
+For pretrained two-GPU training, add `model.backbone.pretrained=true` to `audioset_h100`. This explicitly downloads pinned, checksum-verified weights (~785 MB); only fixed sinusoidal positions are regenerated for the shorter window. Learned tensors load strictly. Use `model.regularizer_kind=sigreg` for a matched regularizer control. SIGReg was introduced in [LeJEPA](https://arxiv.org/abs/2511.08544); our implementation is adapted from H-JEPA's pinned code.
 
 Keep data, initialization, horizons, batch population, and budgets matched across comparisons. Resume with `ckpt_path=/path/last.ckpt` and a new run directory, retaining the original planned schedule.
+
+The AudioSet masked-only control isolates the added objectives under our crop recipe; it does not reproduce the published WavJEPA recipe. The pointwise-versus-flat comparison changes target coordinates and upper-space regularization together. It cannot by itself establish that aggregation or a particular collapse-prevention mechanism caused a gain.
 
 Validation logs [temporal diagnostics](docs/TEMPORAL_DIAGNOSTICS.md): within/between-recording variance, persistence error, and sensitivity to context order. New flat controls regularize the shared space once; old checkpoints preserve their original loss definition.
 

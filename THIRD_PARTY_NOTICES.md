@@ -18,7 +18,13 @@ commercial-rights claim is made for pretrained weights or dependencies.
 Unrelated upstream denoising, data-loading and evaluation vendor packages are
 not imported. Source reuse does not imply upstream endorsement or reproduced results.
 
-## H-JEPA SIGReg
+## SIGReg: LeJEPA method, H-JEPA implementation
+
+Sketched Isotropic Gaussian Regularization was introduced by Randall Balestriero
+and Yann LeCun in [LeJEPA: Provable and Scalable Self-Supervised Learning Without
+the Heuristics](https://arxiv.org/abs/2511.08544). The implementation reused here
+comes from H-JEPA; the code provenance below does not attribute the method's
+origin to H-JEPA.
 
 `src/objectives/sigreg.py` adapts SIGReg from `h_jepa/loss.py` in
 [kevinghst/H-JEPA](https://github.com/kevinghst/H-JEPA), commit
