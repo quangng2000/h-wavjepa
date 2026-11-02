@@ -93,6 +93,8 @@ The AudioSet masked-only control isolates the added objectives under our crop re
 
 For a four-way comparison, independently toggle `model.aggregation_windows=[1,1,1]` versus `[1,2,2]` and `model.temporal_variance_weight=0` versus `0.1`. Existing pointwise presets keep the first choice and zero temporal weight. The [temporal guide](docs/TEMPORAL_AGGREGATION.md) specifies support, targets, controls and limitations.
 
+[Learned Conv1D aggregation](docs/CONV1D_AGGREGATION.md) adds matched `audioset_conv1d` and `audioset_nat_conv1d` variants, including four-H100 presets. They replace averaging with trainable two-tap kernels before the upper MLPs, retaining the temporal training geometry. Downstream gains and GPU throughput remain unmeasured.
+
 Validation logs [temporal diagnostics](docs/TEMPORAL_DIAGNOSTICS.md): within/between-recording variance, persistence error, and sensitivity to context order. New flat controls regularize the shared space once; old checkpoints preserve their original loss definition.
 
 Before hierarchy training, the [frozen-readout probe](docs/TEMPORAL_DIAGNOSTICS.md#frozen-released-weight-probe) measures the released WavJEPA window states on a reproducible local audio cohort.

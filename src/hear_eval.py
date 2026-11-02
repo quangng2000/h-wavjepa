@@ -119,6 +119,7 @@ def export_task(
         ),
         "training_state_strides": list(model.encoder.state_strides),
         "aggregation_windows": list(model.encoder.aggregation_windows),
+        "aggregation_mode": model.encoder.aggregation_mode,
         "level_support_windows": list(model.encoder.level_support_windows),
         "selected_support_windows": model.support_windows,
         "scene_pooling": (
