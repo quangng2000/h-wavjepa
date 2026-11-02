@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - audioset_temporal
+  - _self_
+
+tags: [audioset, conv1d-aggregation, temporal-variance, localereg, unbenchmarked]
+model:
+  aggregation_mode: conv1d

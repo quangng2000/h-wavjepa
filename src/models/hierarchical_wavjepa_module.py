@@ -6,7 +6,7 @@ This observational audio extension is not H-JEPA's action-conditioned planner.
 
 References and adaptation choices: docs/UPSTREAM_DYNAMICS.md. The pointwise
 baseline follows H-JEPA's experimental window_size=1. The optional temporal
-version pools causal, valid windows of lower states before each upper map.
+version aggregates causal, valid windows of lower states before each upper map.
 """
 
 import json
@@ -23,6 +23,7 @@ from lightning.pytorch.strategies import DDPStrategy, SingleDeviceStrategy
 from torch import Tensor, nn
 from transformers import get_cosine_schedule_with_warmup
 
+from src.models.components.aggregation import validate_aggregation_mode, with_convolutions
 from src.models.components.temporal_predictor import TemporalPredictor
 from src.models.components.wavjepa_backbone import WavJEPABackbone
 from src.objectives.distributed import prepare_population
@@ -41,7 +42,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
     For context_windows=C, target index at level l is C-1+horizons[l].
     State stride subsamples past states, not raw samples or target windows. The
     same final observed window must be retained at every level. Each upper map
-    optionally pools a causal window of lower states on that lower level's grid.
+    optionally aggregates a causal window of lower states on that lower level's grid.
     Only states with complete support exist; no boundary padding is introduced.
     All levels have the same width. Pointwise behavior is the default baseline.
     """
@@ -67,6 +68,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "readout_mode": "legacy",
         "regularization_scope": "per_level",
         "aggregation_windows": [1, 1, 1],
+        "aggregation_mode": "mean",
         "temporal_variance_weight": 0.0,
         "temporal_std_floor": 0.1,
         "temporal_variance_epsilon": 1e-4,
@@ -111,6 +113,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         temporal_variance_epsilon: float = 1e-4,
         masked_crops_per_recording: int = 0,
         masked_crop_samples: int | None = None,
+        aggregation_mode: str = "mean",
     ) -> None:
         super().__init__()
         if type(masked_crops_per_recording) is not int or masked_crops_per_recording < 0:
@@ -191,6 +194,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("every aggregation level must have complete support in the context")
         if type(hierarchy) is not bool:
             raise ValueError("hierarchy must be boolean")
+        validate_aggregation_mode(aggregation_mode, hierarchy)
         for name, value in (
             ("temporal_variance_weight", temporal_variance_weight),
             ("temporal_std_floor", temporal_std_floor),
@@ -253,6 +257,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         self.horizons = horizons
         self.state_strides = state_strides
         self.aggregation_windows = aggregation_windows
+        self.aggregation_mode = aggregation_mode
         self._level_support_windows = tuple(support_windows)
         self.temporal_variance_weight = float(temporal_variance_weight)
         self.temporal_std_floor = float(temporal_std_floor)
@@ -274,6 +279,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             else nn.Identity()
             for _ in range(2)
         )
+        if aggregation_mode == "conv1d":
+            self.abstractions = with_convolutions(
+                self.abstractions, width, (aggregation_windows, state_strides)
+            )
         self.teacher_abstractions = deepcopy(self.abstractions).requires_grad_(False).eval()
         self.predictors = nn.ModuleList(
             TemporalPredictor(width, context_windows, predictor_layers, predictor_heads)
@@ -300,6 +309,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "horizons": list(horizons),
             "state_strides": list(state_strides),
             "aggregation_windows": list(aggregation_windows),
+            "aggregation_mode": aggregation_mode,
             "temporal_variance_weight": self.temporal_variance_weight,
             "temporal_std_floor": self.temporal_std_floor,
             "temporal_variance_epsilon": self.temporal_variance_epsilon,
@@ -437,6 +447,11 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         if low.ndim != 3:
             raise ValueError("low states must have shape [batch, time, feature]")
         abstractions = self.teacher_abstractions if teacher else self.abstractions
+        if self.aggregation_mode == "conv1d":
+            result = [low]
+            for abstract in abstractions:
+                result.append(abstract(result[-1]))
+            return self._subsample_levels(result, low.shape[1]) if subsample else result
         if self.aggregation_windows == (1, 1, 1):
             # Preserve the baseline's original operation ordering and numerics.
             return self._levels(low, abstractions, self.state_strides if subsample else (1, 1, 1))

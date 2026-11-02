@@ -312,10 +312,11 @@ def test_invalid_aggregation_and_temporal_variance_contracts_fail_early(options)
         temporal_model(**options)
 
 
+@torch.no_grad()
 def test_checkpoint_roundtrip_records_aggregation_and_penalty_and_rejects_changed_semantics(
     tmp_path,
 ):
-    model = temporal_model(temporal_variance_weight=0.3).eval()
+    model = temporal_model(temporal_variance_weight=0.3).eval().requires_grad_(False)
     checkpoint = checkpoint_for(model)
     path = tmp_path / "temporal.ckpt"
     torch.save(checkpoint, path)
@@ -338,8 +339,10 @@ def test_checkpoint_roundtrip_records_aggregation_and_penalty_and_rejects_change
             changed.on_load_checkpoint(checkpoint)
 
 
+@torch.no_grad()
 def test_old_checkpoint_defaults_to_original_pointwise_objective(tmp_path):
-    source = model_factory().eval()
+    # Match the frozen loader's inference path for bitwise Transformer comparisons.
+    source = model_factory().eval().requires_grad_(False)
     checkpoint = checkpoint_for(source)
     for field in (
         "aggregation_windows",

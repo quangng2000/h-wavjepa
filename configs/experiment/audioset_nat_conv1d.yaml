@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - audioset_nat
+  - _self_
+
+tags: [audioset, wavjepa-nat, binaural, conv1d-aggregation, unbenchmarked]
+model:
+  aggregation_mode: conv1d

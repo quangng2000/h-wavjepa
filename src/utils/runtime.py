@@ -15,6 +15,8 @@ import torch.distributed as dist
 from lightning_utilities.core.rank_zero import rank_zero_only
 from omegaconf import DictConfig, OmegaConf
 
+from src.models.components.aggregation import validate_aggregation_mode
+
 
 def all_ranks_true(flag: torch.Tensor, *, synchronize: bool = True) -> bool:
     """Agree on a scalar validity flag before any rank takes a failure branch.
@@ -204,6 +206,7 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
     if any(high % low for low, high in zip(strides[:-1], strides[1:])):
         raise ValueError("state_strides must be nested integer multiples of the prior level")
     aggregation = cfg.model.get("aggregation_windows", [1, 1, 1])
+    validate_aggregation_mode(cfg.model.get("aggregation_mode", "mean"), cfg.model.hierarchy)
     if (
         len(aggregation) != 3
         or any(type(value) is not int or value < 1 for value in aggregation)

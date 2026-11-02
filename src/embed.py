@@ -91,6 +91,7 @@ def extract_embeddings(
             if model.backbone.config.get("input_channels", 1) == 2
             else "mono",
             aggregation_windows=list(model.aggregation_windows),
+            aggregation_mode=model.aggregation_mode,
             level_support_windows=list(model.level_support_windows),
             training_state_strides=list(model.state_strides),
             temporal_context="whole manifest crop; never split or reset between internal windows",

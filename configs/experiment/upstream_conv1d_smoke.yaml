@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - upstream_temporal_smoke
+  - _self_
+
+tags: [upstream-wavjepa, conv1d-aggregation, temporal-variance, smoke, unbenchmarked]
+model:
+  aggregation_mode: conv1d

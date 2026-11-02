@@ -50,6 +50,8 @@ state_strides: [1, 2, 4]
 # Pointwise baseline. Temporal presets pool causal windows before each upper MLP.
 # [1,2,2] with these strides gives support widths [1,2,4] completed audio windows.
 aggregation_windows: [1, 1, 1]
+# mean preserves pointwise/average-pooling checkpoints; conv1d learns the kernel.
+aggregation_mode: mean
 hierarchy: true
 # Matching top-k transformations on online/EMA inputs to the upper maps.
 # Old checkpoints without this field retain their original legacy readout.
