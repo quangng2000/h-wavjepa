@@ -33,7 +33,7 @@ def test_ema_tracks_convolution_weights_after_an_online_change():
 
 
 def test_checkpoint_roundtrip_preserves_learned_convolutions_and_predictions(tmp_path):
-    model = conv_model().eval()
+    model = conv_model().eval().requires_grad_(False)
     with torch.no_grad():
         next(model.abstractions[0][0].parameters()).add_(0.02)
     model.update_teacher()
@@ -45,7 +45,7 @@ def test_checkpoint_roundtrip_preserves_learned_convolutions_and_predictions(tmp
     assert restored.config["aggregation_mode"] == "conv1d"
     assert_same_state(model, restored)
     audio = waveform()
-    # Both sides must use inference kernels; the loader freezes its parameters.
+    # Match both inference mode and parameter flags: the loader freezes its weights.
     with torch.no_grad():
         for left, right in zip(model.encode(audio), restored.encode(audio), strict=True):
             torch.testing.assert_close(left, right, rtol=0, atol=0)
@@ -57,7 +57,7 @@ def test_checkpoint_roundtrip_preserves_learned_convolutions_and_predictions(tmp
 
 @pytest.mark.parametrize("windows", [[1, 1, 1], [1, 2, 2]])
 def test_old_checkpoint_without_mode_retains_its_original_mean_behavior(tmp_path, windows):
-    model = model_factory(aggregation_windows=windows).eval()
+    model = model_factory(aggregation_windows=windows).eval().requires_grad_(False)
     checkpoint = checkpoint_for(model)
     checkpoint[model.CHECKPOINT_KEY]["dynamics"].pop("aggregation_mode")
     path = tmp_path / "old.ckpt"
