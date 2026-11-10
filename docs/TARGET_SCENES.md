@@ -96,6 +96,49 @@ Report, per level and per arm: `within_variance_fraction`, absolute within and
 between variance, and downstream scene, event and spatial probes. A spatial
 probe is needed to see the cost above.
 
+## Masked-weight sweep
+
+The 2×2 only compares a masked anchor at weight 1 with none. The toy-model
+statement is finer: a masked term keeps content only above some weight, and
+only if content has more energy than nuisance in the masked target; with
+independent targets, too heavy a masked term can undo their effect. Neither
+threshold is known for audio, so sweep the weight in both scene arms:
+
+| Scene arm | Masked weight 0 | 0.3 | 1 | 3 |
+| --- | --- | --- | --- | --- |
+| Shared | `audioset_nat_future_only_h100_four` | `audioset_nat_h100_four model.masked_weight=0.3` | `audioset_nat_h100_four` | `audioset_nat_h100_four model.masked_weight=3.0` |
+| Independent upper targets | `audioset_nat_independent_targets_future_only_h100_four` | `audioset_nat_independent_targets_h100_four model.masked_weight=0.3` | `audioset_nat_independent_targets_h100_four` | `audioset_nat_independent_targets_h100_four model.masked_weight=3.0` |
+
+Each cell is the value of `experiment=`, followed by its override where one is
+shown. The grid is a starting point, not derived from any measurement. Weight 0
+is a separate preset because it also removes the separate masked crops. A test
+checks that the override changes nothing but the weight.
+
+## Horizon check
+
+In the toy model a longer horizon never changes which factor is selected; it
+only weakens the guarantee that independent targets give. To test whether the
+horizon matters here, compare a matched pair that differs only in the horizons
+and the excerpt length they require:
+
+| Horizons | Command after `experiment=audioset_nat_independent_targets_h100_four` |
+| --- | --- |
+| 1, 2, 4 | `model.aggregation_windows=[1,1,1]` |
+| 1, 2, 3 | `model.aggregation_windows=[1,1,1] model.horizons=[1,2,3] data.num_samples=129280` |
+
+Both use the **pointwise** hierarchy, and 1, 2, 3 is the only shorter set
+available:
+
+- Horizons must be strictly increasing.
+- With temporal aggregation the medium and high targets span 2 and 4 windows.
+  Horizons 2 and 4 are therefore already the shortest for which every target
+  lies after the observed prefix. A shorter horizon there would put part of
+  the target inside the prefix. `validate_config` does not check this, so do
+  not shorten horizons on an aggregated preset.
+
+A test checks that every Nat arm preset keeps its targets after the prefix and
+that the pair above differs only in horizons and excerpt length.
+
 ## Boundaries
 
 - Nat only. Mono and clean-binaural data have no scene to redraw, and the

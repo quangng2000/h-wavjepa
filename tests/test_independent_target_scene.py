@@ -25,6 +25,8 @@ ARM_MODEL_KEYS = (
     "masked_crops_per_recording",
     "masked_crop_samples",
 )
+POINTWISE = "model.aggregation_windows=[1,1,1]"
+SHORT_HORIZONS = ("model.horizons=[1,2,3]", "data.num_samples=129280")
 ARMS = {
     "audioset_nat_independent_targets": (True, 1.0, 8),
     "audioset_nat_independent_targets_h100_four": (True, 1.0, 8),
@@ -77,6 +79,19 @@ def without_arm_settings(cfg):
         for key in keys:
             plain[section].pop(key)
     return plain
+
+
+def as_plain(cfg):
+    return OmegaConf.to_container(cfg, resolve=False)
+
+
+def target_supports(cfg):
+    supports = [1]
+    for window, stride in zip(
+        cfg.model.aggregation_windows[1:], cfg.model.state_strides[:-1], strict=True
+    ):
+        supports.append(supports[-1] + (window - 1) * stride)
+    return supports
 
 
 def test_decode_adds_a_second_scene_without_changing_the_first():
@@ -271,3 +286,43 @@ def test_runtime_rejects_inconsistent_target_scene_options(overrides, manifest, 
     cfg = nat_experiment("audioset_nat_independent_targets", *overrides, manifest=manifest)
     with pytest.raises(ValueError, match=message):
         validate_config(cfg)
+
+
+@pytest.mark.parametrize("weight", [0.3, 3.0])
+@pytest.mark.parametrize(
+    "experiment", ["audioset_nat_h100_four", "audioset_nat_independent_targets_h100_four"]
+)
+def test_masked_weight_sweep_changes_only_the_weight(experiment, weight):
+    cfg = nat_experiment(experiment, f"model.masked_weight={weight}")
+    validate_config(cfg)
+    swept, baseline = as_plain(cfg), as_plain(nat_experiment(experiment))
+    assert swept["model"].pop("masked_weight") == weight
+    assert baseline["model"].pop("masked_weight") == 1.0
+    assert swept == baseline
+
+
+@pytest.mark.parametrize("experiment", ["audioset_nat", "audioset_nat_h100_four", *ARMS])
+def test_every_arm_keeps_its_targets_after_the_observed_prefix(experiment):
+    cfg = nat_experiment(experiment)
+    assert all(
+        horizon >= support
+        for horizon, support in zip(cfg.model.horizons, target_supports(cfg), strict=True)
+    )
+
+
+def test_short_horizon_pair_is_pointwise_and_differs_only_in_horizon():
+    experiment = "audioset_nat_independent_targets_h100_four"
+    default = nat_experiment(experiment, POINTWISE)
+    short = nat_experiment(experiment, POINTWISE, *SHORT_HORIZONS)
+    for cfg in (default, short):
+        validate_config(cfg)
+        assert target_supports(cfg) == [1, 1, 1]
+    assert list(default.model.horizons) == [1, 2, 4]
+    assert list(short.model.horizons) == [1, 2, 3]
+    window = short.model.backbone.config.window_samples
+    assert short.data.num_samples == window * (short.model.context_windows + 3)
+    plain_default, plain_short = as_plain(default), as_plain(short)
+    for plain in (plain_default, plain_short):
+        plain["model"].pop("horizons")
+        plain["data"].pop("num_samples")
+    assert plain_default == plain_short
