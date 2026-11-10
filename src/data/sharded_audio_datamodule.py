@@ -526,9 +526,12 @@ def _decode(
     crops_per_recording: int = 0,
     crop_samples: int | None = None,
     clean_binaural: bool = False,
+    independent_target_scene: bool = False,
 ):
     if clean_binaural and naturalistic is not None:
         raise ValueError("Clean binaural decoding cannot also render naturalistic assets")
+    if independent_target_scene and naturalistic is None:
+        raise ValueError("An independent target scene requires naturalistic rendering")
     if len(raw) > 2 * sample_rate * 30 + 65536:
         raise ValueError("Audio member exceeds the 30 second preparation contract")
     with wave.open(io.BytesIO(raw), "rb") as handle:
@@ -555,7 +558,17 @@ def _decode(
     if sys.byteorder != "little":
         raise RuntimeError("The streaming PCM decoder requires a little-endian host")
     audio = torch.frombuffer(bytearray(pcm), dtype=torch.int16).float().div_(32768.0)
+    target_scene = None
     if naturalistic is not None:
+        if independent_target_scene:
+            # A second rendering of the same dry recording with its own seed.
+            # Room, source position, noise and SNR are drawn independently, so
+            # nothing but the source is shared with the scene rendered below.
+            digest = hashlib.blake2b(
+                f"target-scene:{seed}:{cycle}:{name}".encode(), digest_size=8
+            ).digest()
+            generator = torch.Generator().manual_seed(int.from_bytes(digest, "little"))
+            target_scene = naturalistic(audio, generator=generator)
         digest = hashlib.blake2b(f"scene:{seed}:{cycle}:{name}".encode(), digest_size=8).digest()
         generator = torch.Generator().manual_seed(int.from_bytes(digest, "little"))
         # Render the complete recording before selecting any excerpts. All crops
@@ -566,6 +579,9 @@ def _decode(
         # chronological and masked crops originate from the same full recording.
         audio = audio.repeat(2, 1)
     result = {"waveform": audio[..., offset : offset + num_samples] if full_clip else audio}
+    if target_scene is not None:
+        # Same chronological excerpt as "waveform", in the other scene.
+        result["target_waveform"] = target_scene[..., offset : offset + num_samples]
     if crops_per_recording:
         if crop_samples is None or crop_samples > frames:
             raise ValueError("Masked crops require enough real audio; padding is forbidden")
@@ -676,6 +692,9 @@ class _AudioStream(IterableDataset):
                                 ),
                                 crop_samples=self.config.get("masked_crop_samples"),
                                 clean_binaural=self.config.get("clean_binaural", False),
+                                independent_target_scene=self.config.get(
+                                    "independent_target_scene", False
+                                ),
                             )
                             emitted += 1
                             if self.quota is not None and emitted >= self.quota:
@@ -724,6 +743,7 @@ class ShardedAudioDataModule(L.LightningDataModule):
         naturalistic_cache_gib: float = 12,
         clean_binaural: bool = False,
         clean_to_nat_transition: dict[str, str] | None = None,
+        independent_target_scene: bool = False,
     ):
         super().__init__()
         if type(shard_prefetch) is not int or shard_prefetch not in (0, 1):
@@ -810,9 +830,12 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "allow_partial_index": allow_partial_index,
             "allow_stream_restart_on_resume": allow_stream_restart_on_resume,
             "clean_binaural": clean_binaural,
+            "independent_target_scene": independent_target_scene,
         }.items():
             if type(value) is not bool:
                 raise ValueError(f"{name} must be a boolean")
+        if independent_target_scene and naturalistic_manifest is None:
+            raise ValueError("independent_target_scene requires a naturalistic manifest")
         self.save_hyperparameters(logger=False)
         self.index = None
         self.index_sha256 = None
@@ -913,7 +936,7 @@ class ShardedAudioDataModule(L.LightningDataModule):
             self._check_resume(self._restored_state)
 
     def state_dict(self):
-        return {
+        state = {
             "index_sha256": self.index_sha256,
             "stream_position_checkpointed": False,
             "configured_seed": self.hparams.seed,
@@ -924,6 +947,11 @@ class ShardedAudioDataModule(L.LightningDataModule):
             "masked_crop_samples": self.hparams.masked_crop_samples,
             "data_mode": self.data_mode,
         }
+        if self.hparams.independent_target_scene:
+            # Recorded only when enabled, so existing runs keep a byte-identical
+            # data state and the pinned clean-to-Nat hashes derived from it.
+            state["independent_target_scene"] = True
+        return state
 
     @property
     def data_mode(self):
@@ -963,6 +991,8 @@ class ShardedAudioDataModule(L.LightningDataModule):
             or state.get("masked_crop_samples") != self.hparams.masked_crop_samples
         ):
             raise ValueError("Checkpoint naturalistic assets or masked crop recipe changed")
+        if state.get("independent_target_scene", False) != self.hparams.independent_target_scene:
+            raise ValueError("Checkpoint target-scene rendering changed")
         if not self.hparams.allow_stream_restart_on_resume:
             raise ValueError(
                 "Streaming positions are not checkpointed. Set allow_stream_restart_on_resume=true "

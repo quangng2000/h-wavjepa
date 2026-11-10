@@ -252,6 +252,23 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         "masked_crop_samples"
     ):
         raise ValueError("Model and data masked crop recipes must match")
+    independent_levels = cfg.model.get("independent_target_levels", [False, False, False])
+    independent_scene = cfg.data.get("independent_target_scene", False)
+    if (
+        len(independent_levels) != 3
+        or any(type(flag) is not bool for flag in independent_levels)
+        or type(independent_scene) is not bool
+    ):
+        raise ValueError(
+            "independent_target_levels needs three booleans and "
+            "independent_target_scene one boolean"
+        )
+    if any(independent_levels) != independent_scene:
+        raise ValueError(
+            "Model independent_target_levels and data independent_target_scene must agree"
+        )
+    if independent_scene and cfg.data.get("naturalistic_manifest") is None:
+        raise ValueError("independent_target_scene requires a naturalistic manifest")
     channels = backbone.get("input_channels", 1)
     if channels not in (1, 2):
         raise ValueError("backbone.input_channels must be 1 or 2")

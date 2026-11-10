@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - audioset_nat
+  - _self_
+
+# Good-view arm: the medium and high levels predict EMA targets rendered in a
+# second, independently drawn scene. The low level and the masked anchor keep
+# the shared scene, so spatial cues remain learnable there.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, independent-targets, unbenchmarked]
+data:
+  independent_target_scene: true
+model:
+  independent_target_levels: [false, true, true]

@@ -49,6 +49,11 @@ spatial cues. The official GRAM helper implements this by summing energy over
 channel and time before computing the SNR gain.
 [GRAM scene mixing](https://github.com/labhamlet/GRAM-T/blob/9d017173e9b405a86050d6d36aba3c01d02a8e6c/src/data_modules/scene_module/generate_scenes_batch.py).
 
+One opt-in research variant departs from the shared scene without rendering
+windows separately: it renders the whole recording a second time and uses that
+second scene only for selected levels' future targets. See
+[independent target scenes](TARGET_SCENES.md).
+
 Two preprocessing conventions are explicit adaptations. The offline noise
 converter takes the first channel of WHAM's stereo recording as the mono noise
 source before applying scene BRIRs; the paper does not specify that channel
