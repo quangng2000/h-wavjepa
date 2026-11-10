@@ -238,6 +238,21 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
             raise ValueError("temporal variance requires learned, active upper forecasting spaces")
         if any(cfg.model.context_windows - support + 1 < 2 for support in supports[1:]):
             raise ValueError("temporal variance requires at least two valid upper context states")
+    if len(cfg.model.prediction_weights) != 3:
+        raise ValueError("prediction_weights must have three entries")
+    # A target ends `horizon` windows after the context and spans `support`
+    # windows, so a shorter horizon would place part of it inside the context.
+    # Checked after the temporal rules so their more specific errors come first.
+    if any(
+        level_weight > 0 and horizon < support
+        for level_weight, horizon, support in zip(
+            cfg.model.prediction_weights, horizons, supports, strict=True
+        )
+    ):
+        raise ValueError(
+            "every trained level needs horizon >= its aggregation support; "
+            "otherwise its target overlaps the observed context"
+        )
     if cfg.data.sample_rate != backbone.sample_rate:
         raise ValueError("data.sample_rate must match backbone.sample_rate")
     crops = cfg.model.get("masked_crops_per_recording", 0)
@@ -252,6 +267,23 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
         "masked_crop_samples"
     ):
         raise ValueError("Model and data masked crop recipes must match")
+    independent_levels = cfg.model.get("independent_target_levels", [False, False, False])
+    independent_scene = cfg.data.get("independent_target_scene", False)
+    if (
+        len(independent_levels) != 3
+        or any(type(flag) is not bool for flag in independent_levels)
+        or type(independent_scene) is not bool
+    ):
+        raise ValueError(
+            "independent_target_levels needs three booleans and "
+            "independent_target_scene one boolean"
+        )
+    if any(independent_levels) != independent_scene:
+        raise ValueError(
+            "Model independent_target_levels and data independent_target_scene must agree"
+        )
+    if independent_scene and cfg.data.get("naturalistic_manifest") is None:
+        raise ValueError("independent_target_scene requires a naturalistic manifest")
     channels = backbone.get("input_channels", 1)
     if channels not in (1, 2):
         raise ValueError("backbone.input_channels must be 1 or 2")

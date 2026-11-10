@@ -38,6 +38,10 @@ between variance identifies a recording-constant risk. Low persistence error and
 no cost from disrupting context order provide further evidence, but these are
 diagnostics, not a learned semantic-quality score or a prevention mechanism.
 
+With [independent target scenes](TARGET_SCENES.md), the persistence metrics
+compare a context-scene origin with a second-scene target and are not
+comparable with a shared-scene run. The variance metrics are unaffected.
+
 Aligned Lightning evaluation estimates variance **within each global validation
 batch**, gathering latent states across ranks before computing nonlinear ratios.
 `val/diagnostic_recordings` records the population size. Standalone evaluation

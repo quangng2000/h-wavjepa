@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - audioset_nat_h100_four
+  - _self_
+
+# Four-H100 form of audioset_nat_independent_targets_future_only.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, independent-targets, future-only, four-h100, unbenchmarked]
+data:
+  independent_target_scene: true
+  masked_crops_per_recording: 0
+  masked_crop_samples: null
+model:
+  independent_target_levels: [false, true, true]
+  masked_weight: 0.0
+  masked_crops_per_recording: 0
+  masked_crop_samples: null

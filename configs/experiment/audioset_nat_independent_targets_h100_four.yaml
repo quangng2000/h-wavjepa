@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - audioset_nat_h100_four
+  - _self_
+
+# Four-H100 form of audioset_nat_independent_targets: same production settings
+# as audioset_nat_h100_four, with upper-level targets from a second scene.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, independent-targets, four-h100, unbenchmarked]
+data:
+  independent_target_scene: true
+model:
+  independent_target_levels: [false, true, true]

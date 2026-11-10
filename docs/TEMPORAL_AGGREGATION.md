@@ -29,7 +29,8 @@ remain separate. Student and EMA targets use the same aggregation geometry.
 
 All indices are zero-based window indices. The forecasting origin remains the end
 of window 4. Targets end at 5, 6 and 8, so every target support lies after the
-observed prefix. The masked branch may train on all nine windows, but its future
+observed prefix. `validate_config` enforces this: a trained level's horizon must
+be at least its support. The masked branch may train on all nine windows, but its future
 activations do not enter online forecasting states or the temporal penalty.
 
 Only fully supported states are used: training neither pads missing history nor

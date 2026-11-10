@@ -273,6 +273,26 @@ def test_upstream_preflight_rejects_unsupported_input_and_runtime(make_config, o
         validate_config(cfg)
 
 
+def test_upstream_preflight_rejects_targets_that_overlap_the_context(make_config):
+    overrides = ["experiment=upstream_temporal_smoke", "model.horizons=[1,2,3]"]
+    with pytest.raises(ValueError, match="overlaps the observed context"):
+        validate_config(make_config(overrides))
+    # A level that is not trained has no target, so its horizon is unconstrained.
+    untrained_high_level = [
+        *overrides,
+        "model.prediction_weights=[1,1,0]",
+        "model.temporal_variance_weight=0",
+        f"data.num_samples={512 * 8}",
+    ]
+    validate_config(make_config(untrained_high_level))
+
+
+def test_upstream_preflight_requires_three_prediction_weights(make_config):
+    cfg = make_config(["experiment=upstream_smoke", "model.prediction_weights=[1,1]"])
+    with pytest.raises(ValueError, match="prediction_weights must have three entries"):
+        validate_config(cfg)
+
+
 def test_upstream_real_audio_preflight_requires_no_padding(make_config):
     cfg = make_config(["experiment=upstream_hierarchical", "data.require_full_length=false"])
     with pytest.raises(ValueError, match="require_full_length=true"):

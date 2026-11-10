@@ -82,6 +82,9 @@ See the [performance guide](docs/PERFORMANCE.md) for token compaction, two/four-
 | `audioset_clean_binaural_h100_four` | Clean first phase of the Nat curriculum; same model, global 16 recordings × 8 crops |
 | `audioset_nat_baseline` / `audioset_nat_baseline_h100_four` | Masked-only Nat control: global 16 recordings × 8 crops |
 | `audioset_nat_pointwise` / `audioset_nat_pointwise_h100_four` | Matched Nat pointwise control, retaining the temporal penalty |
+| `audioset_nat_independent_targets` / `audioset_nat_independent_targets_h100_four` | Nat hierarchy whose medium and high future targets come from a second, independently drawn scene |
+| `audioset_nat_future_only` / `audioset_nat_future_only_h100_four` | Nat hierarchy without the masked anchor or its separate crops |
+| `audioset_nat_independent_targets_future_only` / `audioset_nat_independent_targets_future_only_h100_four` | Both of the above together |
 | `upstream_hierarchical` / `upstream_pretrained` | Original 18.09-second long-recording presets |
 | `upstream_sigreg` / `upstream_baseline` | SIGReg and masked-objective controls on long recordings |
 
@@ -94,6 +97,8 @@ The AudioSet masked-only control isolates the added objectives under our crop re
 For a four-way comparison, independently toggle `model.aggregation_windows=[1,1,1]` versus `[1,2,2]` and `model.temporal_variance_weight=0` versus `0.1`. Existing pointwise presets keep the first choice and zero temporal weight. The [temporal guide](docs/TEMPORAL_AGGREGATION.md) specifies support, targets, controls and limitations.
 
 [Learned Conv1D aggregation](docs/CONV1D_AGGREGATION.md) adds matched `audioset_conv1d` and `audioset_nat_conv1d` variants, including four-H100 presets. They replace averaging with trainable two-tap kernels before the upper MLPs, retaining the temporal training geometry. Downstream gains and GPU throughput remain unmeasured.
+
+[Independent target scenes](docs/TARGET_SCENES.md) add an opt-in Nat variant in which selected levels predict targets rendered in a second scene, with a matched 2×2 against the masked anchor. It is untested: no downstream result or throughput measurement exists.
 
 Validation logs [temporal diagnostics](docs/TEMPORAL_DIAGNOSTICS.md): within/between-recording variance, persistence error, and sensitivity to context order. New flat controls regularize the shared space once; old checkpoints preserve their original loss definition.
 

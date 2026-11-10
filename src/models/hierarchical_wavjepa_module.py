@@ -74,6 +74,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         "temporal_variance_epsilon": 1e-4,
         "masked_crops_per_recording": 0,
         "masked_crop_samples": None,
+        "independent_target_levels": [False, False, False],
     }
 
     def __init__(
@@ -114,6 +115,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         masked_crops_per_recording: int = 0,
         masked_crop_samples: int | None = None,
         aggregation_mode: str = "mean",
+        independent_target_levels: Sequence[bool] = (False, False, False),
     ) -> None:
         super().__init__()
         if type(masked_crops_per_recording) is not int or masked_crops_per_recording < 0:
@@ -221,6 +223,16 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             raise ValueError("at least one prediction objective must be active")
         if hierarchy and any(prediction_weights[1:]) and regularization_weight <= 0:
             raise ValueError("learned upper-level targets require positive regularization_weight")
+        independent_target_levels = tuple(independent_target_levels)
+        if len(independent_target_levels) != 3 or any(
+            type(flag) is not bool for flag in independent_target_levels
+        ):
+            raise ValueError("independent_target_levels must contain three booleans")
+        if any(
+            flag and weight <= 0
+            for flag, weight in zip(independent_target_levels, prediction_weights, strict=True)
+        ):
+            raise ValueError("an independent target scene needs a positive prediction weight")
         if not math.isfinite(temporal_variance_epsilon) or temporal_variance_epsilon <= 0:
             raise ValueError("temporal_variance_epsilon must be finite and positive")
         if not math.isfinite(temporal_std_floor) or temporal_std_floor <= math.sqrt(
@@ -258,6 +270,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         self.state_strides = state_strides
         self.aggregation_windows = aggregation_windows
         self.aggregation_mode = aggregation_mode
+        self.independent_target_levels = independent_target_levels
         self._level_support_windows = tuple(support_windows)
         self.temporal_variance_weight = float(temporal_variance_weight)
         self.temporal_std_floor = float(temporal_std_floor)
@@ -321,6 +334,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             "masked_weight": self.masked_weight,
             "masked_crops_per_recording": self.masked_crops_per_recording,
             "masked_crop_samples": self.masked_crop_samples,
+            "independent_target_levels": list(independent_target_levels),
             "regularization_weight": self.regularization_weight,
             "regularization_scope": regularization_scope,
             "ema_decay": self.ema_decay,
@@ -502,6 +516,37 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             subsample=subsample,
         )
 
+    @torch.no_grad()
+    def _independent_targets(
+        self, targets: list[Tensor], target_windows: Tensor, indices: list[int]
+    ) -> list[Tensor]:
+        """Take the flagged levels' future targets from the other rendered scene.
+
+        The EMA teacher encodes the target waveform exactly as it encodes the
+        context scene, so only the room, source position and noise differ.
+        Unflagged levels keep the targets already computed from the context scene.
+        """
+        if self.aggregation_windows != (1, 1, 1):
+            levels = self.levels_from_low(
+                self.backbone.encode_teacher_windows(target_windows), teacher=True
+            )
+            replacements = [
+                values[:, endpoint - support + 1]
+                for values, endpoint, support in zip(
+                    levels, indices, self.level_support_windows, strict=True
+                )
+            ]
+        else:
+            selected = self.backbone.encode_teacher_windows(target_windows[:, indices])
+            levels = self._levels(selected, self.teacher_abstractions)
+            replacements = [values[:, i] for i, values in enumerate(levels)]
+        return [
+            replacement if independent else target
+            for target, replacement, independent in zip(
+                targets, replacements, self.independent_target_levels, strict=True
+            )
+        ]
+
     def _predict_levels(self, levels: list[Tensor]) -> list[Tensor]:
         """Consume already-subsampled levels with their original window positions."""
         predictions = []
@@ -530,6 +575,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
         diagnostics: bool = False,
         masked_crops: Tensor | None = None,
         synchronized_evaluation: bool = False,
+        target_waveform: Tensor | None = None,
     ) -> dict[str, Any]:
         # Only aligned Lightning validation/test loaders opt into collectives.
         # Standalone inference/evaluation may run on one rank and stays local.
@@ -575,6 +621,19 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             valid &= torch.isfinite(masked_crops).all() if valid_crops else False
         elif masked_crops is not None:
             valid &= False
+        independent_targets = any(self.independent_target_levels)
+        if independent_targets:
+            # The second scene is another rendering of the same excerpt, so it
+            # must match the context waveform in everything but its samples.
+            valid_target = (
+                isinstance(target_waveform, Tensor)
+                and target_waveform.shape == waveform.shape
+                and target_waveform.dtype == torch.float32
+                and target_waveform.device == waveform.device
+            )
+            valid &= torch.isfinite(target_waveform).all() if valid_target else False
+        elif target_waveform is not None:
+            valid &= False
         if distributed_objective:
             if not all_ranks_true(valid):
                 stage = "training" if distributed_training else "evaluation"
@@ -585,6 +644,9 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             self._windows(waveform, self.sample_windows)
             if forecasting or not self.masked_crops_per_recording
             else None
+        )
+        target_windows = (
+            self._windows(target_waveform, self.sample_windows) if independent_targets else None
         )
         if seed is None and not self.training:
             seed = self.eval_seed
@@ -672,6 +734,10 @@ class HierarchicalWavJEPAModule(L.LightningModule):
                                 values[:, 0]
                                 for values in self._levels(origin_low, self.teacher_abstractions)
                             ]
+                    if target_windows is not None:
+                        # Origins above stay in the context scene: persistence
+                        # diagnostics then include the change of scene.
+                        targets = self._independent_targets(targets, target_windows, indices)
                 terms = [
                     F.mse_loss(prediction.float(), target.float()) if weight > 0 else zero
                     for prediction, target, weight in zip(
@@ -838,6 +904,7 @@ class HierarchicalWavJEPAModule(L.LightningModule):
             diagnostics=stage != "train",
             masked_crops=batch.get("masked_crops"),
             synchronized_evaluation=synchronized_evaluation,
+            target_waveform=batch.get("target_waveform"),
         )
         if (
             stage == "train"

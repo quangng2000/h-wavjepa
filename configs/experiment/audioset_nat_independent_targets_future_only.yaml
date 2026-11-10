@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - audioset_nat_future_only
+  - _self_
+
+# Good-view arm without the masked anchor: upper-level targets come from an
+# independently drawn scene and no masked loss is trained.
+tags: [audioset, wavjepa-nat, binaural, temporal-aggregation, independent-targets, future-only, unbenchmarked]
+data:
+  independent_target_scene: true
+model:
+  independent_target_levels: [false, true, true]

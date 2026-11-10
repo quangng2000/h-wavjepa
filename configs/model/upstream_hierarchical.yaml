@@ -60,6 +60,9 @@ hidden_dim: 256
 predictor_layers: 2
 predictor_heads: 4
 prediction_weights: [1.0, 1.0, 1.0]
+# Levels whose future targets come from a second, independently rendered Nat
+# scene of the same recording. Requires data.independent_target_scene=true.
+independent_target_levels: [false, false, false]
 masked_weight: 1.0
 regularization_weight: 0.1
 # Optional upper-space temporal pressure, independent of the cross-recording loss.
