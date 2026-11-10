@@ -326,3 +326,9 @@ def test_short_horizon_pair_is_pointwise_and_differs_only_in_horizon():
         plain["model"].pop("horizons")
         plain["data"].pop("num_samples")
     assert plain_default == plain_short
+
+
+def test_short_horizons_are_rejected_on_an_aggregated_arm():
+    cfg = nat_experiment("audioset_nat_independent_targets_h100_four", *SHORT_HORIZONS)
+    with pytest.raises(ValueError, match="overlaps the observed context"):
+        validate_config(cfg)

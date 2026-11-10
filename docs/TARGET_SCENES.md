@@ -133,11 +133,9 @@ available:
 - With temporal aggregation the medium and high targets span 2 and 4 windows.
   Horizons 2 and 4 are therefore already the shortest for which every target
   lies after the observed prefix. A shorter horizon there would put part of
-  the target inside the prefix. `validate_config` does not check this, so do
-  not shorten horizons on an aggregated preset.
+  the target inside the prefix, and `validate_config` rejects it.
 
-A test checks that every Nat arm preset keeps its targets after the prefix and
-that the pair above differs only in horizons and excerpt length.
+A test checks that the pair above differs only in horizons and excerpt length.
 
 ## Boundaries
 

@@ -238,6 +238,21 @@ def _validate_upstream_forecasting(cfg: DictConfig) -> None:
             raise ValueError("temporal variance requires learned, active upper forecasting spaces")
         if any(cfg.model.context_windows - support + 1 < 2 for support in supports[1:]):
             raise ValueError("temporal variance requires at least two valid upper context states")
+    if len(cfg.model.prediction_weights) != 3:
+        raise ValueError("prediction_weights must have three entries")
+    # A target ends `horizon` windows after the context and spans `support`
+    # windows, so a shorter horizon would place part of it inside the context.
+    # Checked after the temporal rules so their more specific errors come first.
+    if any(
+        level_weight > 0 and horizon < support
+        for level_weight, horizon, support in zip(
+            cfg.model.prediction_weights, horizons, supports, strict=True
+        )
+    ):
+        raise ValueError(
+            "every trained level needs horizon >= its aggregation support; "
+            "otherwise its target overlaps the observed context"
+        )
     if cfg.data.sample_rate != backbone.sample_rate:
         raise ValueError("data.sample_rate must match backbone.sample_rate")
     crops = cfg.model.get("masked_crops_per_recording", 0)
