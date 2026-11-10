@@ -197,6 +197,14 @@ def test_hung_sdk_threads_are_killed_reaped_and_scratch_removed(gateway, tmp_pat
         os.kill(children[0].pid, 0)
 
 
+def _exited(pid: int) -> bool:
+    """Gone or a zombie. The process may vanish between two separate psutil calls."""
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 def test_download_child_does_not_outlive_abruptly_terminated_worker(gateway, tmp_path):
     client, state = gateway
     state["objects"]["/private/object"] = b"object"
@@ -228,14 +236,9 @@ def test_download_child_does_not_outlive_abruptly_terminated_worker(gateway, tmp
         parent.terminate()  # SIGTERM deliberately bypasses the parent's finally block.
         parent.wait(timeout=2)
         deadline = time.monotonic() + 3
-        while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
-            if psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE:
-                break
+        while not _exited(child_pid) and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert (
-            not psutil.pid_exists(child_pid)
-            or psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
-        )
+        assert _exited(child_pid)
         assert not (tmp_path / "data.tar").exists()
     finally:
         if parent.poll() is None:
